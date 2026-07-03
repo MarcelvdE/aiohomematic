@@ -7,6 +7,7 @@ This module provides DeviceDetailsCache which enriches devices with human-readab
 names, interface mapping, rooms, functions, and address IDs fetched via the backend.
 """
 
+import asyncio
 from collections import defaultdict
 from collections.abc import Mapping
 from datetime import datetime
@@ -50,6 +51,7 @@ class DeviceDetailsCache(DeviceDetailsProviderProtocol, DeviceDetailsWriterProto
         "_device_rooms",
         "_functions",
         "_interface_cache",
+        "_load_lock",
         "_names_cache",
         "_primary_client_provider",
         "_refreshed_at",
@@ -69,6 +71,7 @@ class DeviceDetailsCache(DeviceDetailsProviderProtocol, DeviceDetailsWriterProto
         self._device_rooms: Final[dict[str, set[str]]] = defaultdict(set)
         self._functions: Final[dict[str, set[str]]] = {}
         self._interface_cache: Final[dict[str, Interface]] = {}
+        self._load_lock: Final = asyncio.Lock()
         self._names_cache: Final[dict[str, str]] = {}
         self._refreshed_at = INIT_DATETIME
 
@@ -121,24 +124,35 @@ class DeviceDetailsCache(DeviceDetailsProviderProtocol, DeviceDetailsWriterProto
         return self._names_cache.get(address)
 
     async def load(self, *, direct_call: bool = False) -> None:
-        """Fetch names from the backend."""
-        if direct_call is False and changed_within_seconds(
-            last_change=self._refreshed_at, max_age=int(MAX_CACHE_AGE / 3)
-        ):
-            return
-        self.clear()
-        _LOGGER.debug("LOAD: Loading names for %s", self._central_info.name)
-        if client := self._primary_client_provider.primary_client:
-            await client.fetch_device_details()
-        _LOGGER.debug("LOAD: Loading rooms for %s", self._central_info.name)
-        self._channel_rooms.clear()
-        self._channel_rooms.update(await self._get_all_rooms())
-        self._device_rooms.clear()
-        self._device_rooms.update(self._prepare_device_rooms())
-        _LOGGER.debug("LOAD: Loading functions for %s", self._central_info.name)
-        self._functions.clear()
-        self._functions.update(await self._get_all_functions())
-        self._refreshed_at = datetime.now()
+        """
+        Fetch names from the backend.
+
+        Serialized via ``_load_lock``: multiple callers (e.g. the per-interface
+        scheduled refresh, which fans out over all clients concurrently via
+        asyncio.gather) can race the check-then-clear-then-refetch sequence
+        below, since it awaits between the staleness check and repopulating
+        the cache. Without the lock, two concurrent calls can interleave their
+        clear()/populate steps and leave the cache missing entries for one
+        of the two backends involved.
+        """
+        async with self._load_lock:
+            if direct_call is False and changed_within_seconds(
+                last_change=self._refreshed_at, max_age=int(MAX_CACHE_AGE / 3)
+            ):
+                return
+            self.clear()
+            _LOGGER.debug("LOAD: Loading names for %s", self._central_info.name)
+            if client := self._primary_client_provider.primary_client:
+                await client.fetch_device_details()
+            _LOGGER.debug("LOAD: Loading rooms for %s", self._central_info.name)
+            self._channel_rooms.clear()
+            self._channel_rooms.update(await self._get_all_rooms())
+            self._device_rooms.clear()
+            self._device_rooms.update(self._prepare_device_rooms())
+            _LOGGER.debug("LOAD: Loading functions for %s", self._central_info.name)
+            self._functions.clear()
+            self._functions.update(await self._get_all_functions())
+            self._refreshed_at = datetime.now()
 
     def remove_device(self, *, device: DeviceRemovalInfoProtocol) -> None:
         """Remove device data from all caches."""
