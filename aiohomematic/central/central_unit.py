@@ -468,6 +468,17 @@ class CentralUnit(
         direct_call: bool = False,
     ) -> None:
         """Refresh data_point data."""
+        # Retry device_details_cache here too if the initial load_all() (start()) failed
+        # to fetch it (e.g. a slow/unresponsive CCU). load() itself no-ops if the cache
+        # was already refreshed recently, so this is safe to call on every scheduled tick.
+        try:
+            await self._cache_coordinator.device_details.load()
+        except BaseHomematicException as ex:
+            _LOGGER.warning(
+                "LOAD_AND_REFRESH_DATA_POINT_DATA: device_details_cache.load() retry failed for %s: %s",
+                self.name,
+                ex,
+            )
         if paramset_key != ParamsetKey.MASTER:
             await self._cache_coordinator.data_cache.load(interface=interface)
         await self._cache_coordinator.data_cache.refresh_data_point_data(

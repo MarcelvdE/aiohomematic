@@ -21,6 +21,7 @@ from typing import Final
 
 from aiohomematic.central.events import DeviceRemovedEvent
 from aiohomematic.central.events.internal import CacheInvalidatedEvent, DataFetchCompletedEvent, DataFetchOperation
+from aiohomematic.exceptions import BaseHomematicException
 from aiohomematic.const import (
     FILE_DEVICES,
     FILE_INCIDENTS,
@@ -306,8 +307,24 @@ class CacheCoordinator(SessionRecorderProviderProtocol, CacheProviderForMetricsP
             await self.clear_all()
             return False  # Signal that caches need to be rebuilt from CCU
 
-        await self._device_details_cache.load()
-        await self._data_cache.load()
+        try:
+            await self._device_details_cache.load()
+        except BaseHomematicException as ex:
+            _LOGGER.warning(  # i18n-log: ignore
+                "LOAD_ALL: device_details_cache.load() failed for %s, continuing with cached topology only: %s",
+                self._central_info.name,
+                ex,
+            )
+
+        try:
+            await self._data_cache.load()
+        except BaseHomematicException as ex:
+            _LOGGER.warning(  # i18n-log: ignore
+                "LOAD_ALL: data_cache.load() failed for %s, values will arrive lazily via push: %s",
+                self._central_info.name,
+                ex,
+            )
+
         return True
 
     async def load_data_cache(self, *, interface: Interface | None = None) -> None:

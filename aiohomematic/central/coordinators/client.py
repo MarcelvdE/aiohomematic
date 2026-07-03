@@ -279,8 +279,18 @@ class ClientCoordinator(ClientCoordinationProtocol, ClientProviderProtocol):
         # calls when device creation takes longer than MAX_CACHE_AGE (10 seconds).
         self._coordinator_provider.cache_coordinator.set_data_cache_initialization_complete()
 
-        # Initialize hub (requires connected clients and devices to fetch programs/sysvars)
-        await self._coordinator_provider.hub_coordinator.init_hub()
+        # Initialize hub (requires connected clients and devices to fetch programs/sysvars).
+        # A hub-data failure (sysvars/programs unreachable) must not undo the device
+        # entities already created above, so it's isolated the same way the detail/value
+        # fetches are in CacheCoordinator.load_all().
+        try:
+            await self._coordinator_provider.hub_coordinator.init_hub()
+        except BaseHomematicException as ex:
+            _LOGGER.warning(  # i18n-log: ignore
+                "START_CLIENTS: init_hub() failed for %s, device entities remain usable: %s",
+                self._central_info.name,
+                ex,
+            )
 
         self._clients_started = True
         return True
