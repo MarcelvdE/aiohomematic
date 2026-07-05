@@ -117,6 +117,11 @@ class CentralConfigProtocol(Protocol):
 
     @property
     @abstractmethod
+    def device_creation_chunk_size(self) -> int:
+        """Return the number of devices processed per chunk during initial device creation."""
+
+    @property
+    @abstractmethod
     def enable_device_firmware_check(self) -> bool:
         """Return if device firmware check is enabled."""
 

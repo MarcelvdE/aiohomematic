@@ -20,6 +20,7 @@ from aiohomematic import client as hmcl, i18n
 from aiohomematic.central.central_unit import CentralUnit
 from aiohomematic.const import (
     DEFAULT_DELAY_NEW_DEVICE_CREATION,
+    DEFAULT_DEVICE_CREATION_CHUNK_SIZE,
     DEFAULT_ENABLE_DEVICE_FIRMWARE_CHECK,
     DEFAULT_ENABLE_PROGRAM_SCAN,
     DEFAULT_ENABLE_SYSVAR_SCAN,
@@ -95,6 +96,9 @@ class CentralConfig(BaseModel):
 
     delay_new_device_creation: bool = DEFAULT_DELAY_NEW_DEVICE_CREATION
     """Delay creation of new devices."""
+
+    device_creation_chunk_size: int = DEFAULT_DEVICE_CREATION_CHUNK_SIZE
+    """Number of devices processed per chunk during initial device creation."""
 
     enable_device_firmware_check: bool = DEFAULT_ENABLE_DEVICE_FIRMWARE_CHECK
     """Enable periodic device firmware checks."""

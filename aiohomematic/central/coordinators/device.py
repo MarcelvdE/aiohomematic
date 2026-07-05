@@ -16,7 +16,8 @@ The DeviceCoordinator provides:
 
 import asyncio
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
+import contextlib
 from datetime import datetime
 import logging
 from typing import Any, Final
@@ -39,7 +40,7 @@ from aiohomematic.const import (
     SystemEventType,
 )
 from aiohomematic.decorators import inspector
-from aiohomematic.exceptions import AioHomematicException
+from aiohomematic.exceptions import AioHomematicException, BaseHomematicException
 from aiohomematic.interfaces import (
     CallbackDataPointProtocol,
     CentralInfoProtocol,
@@ -63,7 +64,11 @@ from aiohomematic.interfaces import (
     TaskSchedulerProtocol,
 )
 from aiohomematic.interfaces.central import FirmwareDataRefresherProtocol
-from aiohomematic.interfaces.client import DeviceDiscoveryAndMetadataProtocol, DeviceDiscoveryWithIdentityProtocol
+from aiohomematic.interfaces.client import (
+    ClientProtocol,
+    DeviceDiscoveryAndMetadataProtocol,
+    DeviceDiscoveryWithIdentityProtocol,
+)
 from aiohomematic.model import create_data_points_and_events
 from aiohomematic.model.custom import create_custom_data_points
 from aiohomematic.model.device import Device
@@ -437,12 +442,21 @@ class DeviceCoordinator(FirmwareDataRefresherProtocol):
             if not devices_created:
                 _LOGGER.warning(  # i18n-log: ignore
                     "CREATE_DEVICES interrupted: built %d of %d device(s) for %s before the run was "
-                    "aborted (cancelled setup or unexpected error); already-built devices were not "
-                    "dispatched and will be retried on the next connection",
+                    "aborted (cancelled setup or unexpected error); rolling back so they are retried "
+                    "on the next connection instead of being stranded",
                     len(new_devices),
                     expected_device_count,
                     self._central_info.name,
                 )
+                # Undo partial registration from this interrupted run: without this, a device
+                # that made it into the registry but was never dispatched (no DEVICES_CREATED
+                # event) would be permanently mistaken for "already exists" by
+                # check_for_new_device_addresses() on every subsequent retry attempt, even
+                # though it has no entities. Removing it here makes it eligible for creation
+                # again on the next attempt (in-process retry, or the next connection).
+                for device in new_devices:
+                    with contextlib.suppress(Exception):
+                        await self.device_registry.remove_device(device_address=device.address)
 
         _LOGGER.debug("CREATE_DEVICES: Finished creating devices for %s", self._central_info.name)
 
@@ -1057,23 +1071,131 @@ class DeviceCoordinator(FirmwareDataRefresherProtocol):
                 return
 
             client = self._coordinator_provider.client_coordinator.get_client(interface_id=interface_id)
+
+            async def _cache_one_description(dev_desc: DeviceDescription) -> bool:
+                """Cache a single device/channel description and fetch its paramsets."""
+                self._coordinator_provider.cache_coordinator.device_descriptions.add_device(
+                    interface_id=interface_id, device_description=dev_desc
+                )
+                # Register interface for device address so Device.interface is correct.
+                # This is critical for JSON-RPC-only backends (CUxD, CCU-Jack) where
+                # fetch_device_details() returns None and interface would default to BIDCOS_RF.
+                self._coordinator_provider.cache_coordinator.device_details.add_interface(
+                    address=dev_desc["ADDRESS"], interface=client.interface
+                )
+                # Only fetch paramset descriptions for new devices (not needed for refresh)
+                if source != SourceOfDeviceCreation.REFRESH or dev_desc in new_device_descriptions:
+                    await self._fetch_paramset_descriptions_with_retry(
+                        client=client, device_description=dev_desc, interface_id=interface_id
+                    )
+                return True
+
+            # Device creation MUST be inside semaphore to prevent race condition:
+            # Without this, startup code can call check_for_new_device_addresses()
+            # while callback is still adding descriptions, causing incomplete devices.
+            await self._process_descriptions_in_chunks(
+                interface_id=interface_id,
+                descriptions=descriptions_to_cache,
+                source=source,
+                process_device_description=_cache_one_description,
+            )
+
+    async def _fetch_paramset_descriptions_with_retry(
+        self,
+        *,
+        client: ClientProtocol,
+        device_description: DeviceDescription,
+        interface_id: str,
+    ) -> None:
+        """
+        Fetch paramset descriptions for one device, retrying transient failures.
+
+        Bounded retry with exponential backoff for ``BaseHomematicException`` (e.g. a
+        transient timeout or connection blip). ``asyncio.CancelledError`` is not a
+        ``BaseHomematicException`` and is therefore never retried here - it propagates
+        immediately so Home Assistant reload/shutdown cancellation still works promptly.
+
+        Args:
+            client: Client to fetch paramset descriptions with.
+            device_description: Device/channel description to fetch paramsets for.
+            interface_id: Interface identifier (for logging only).
+
+        """
+        timeout_config = self._config_provider.config.timeout_config
+        max_attempts = timeout_config.device_sync_max_attempts
+        for attempt in range(1, max_attempts + 1):
+            try:
+                await client.fetch_paramset_descriptions(device_description=device_description)
+            except BaseHomematicException as exc:
+                if attempt >= max_attempts:
+                    raise
+                delay = timeout_config.device_sync_initial_retry_delay * (
+                    timeout_config.reconnect_backoff_factor ** (attempt - 1)
+                )
+                _LOGGER.debug(
+                    "FETCH_PARAMSET_DESCRIPTIONS: attempt %d/%d failed for %s on %s, retrying in %.1fs: %s",
+                    attempt,
+                    max_attempts,
+                    device_description["ADDRESS"],
+                    interface_id,
+                    delay,
+                    exc,
+                )
+                await asyncio.sleep(delay)
+            else:
+                return
+
+    async def _process_descriptions_in_chunks(
+        self,
+        *,
+        interface_id: str,
+        descriptions: tuple[DeviceDescription, ...],
+        source: SourceOfDeviceCreation,
+        process_device_description: Callable[[DeviceDescription], Awaitable[bool]],
+    ) -> None:
+        """
+        Process device/channel descriptions in device-aligned chunks.
+
+        Groups descriptions by owning device address so a chunk boundary never splits one
+        device's channels, then for each chunk: runs ``process_device_description`` per
+        entry, persists the cache, and dispatches newly-complete devices to Home Assistant.
+
+        This bounds how much progress an interruption (e.g. ``CancelledError`` from a
+        cancelled config-entry reload, or a Home Assistant restart mid-sync) can lose to a
+        single chunk instead of the entire interface's device list - the previous
+        implementation only persisted the cache and dispatched entities once, after the
+        *entire* device list had been processed.
+
+        Args:
+            interface_id: Interface identifier.
+            descriptions: Device/channel descriptions to process.
+            source: Source of device creation (passed through to ``create_devices``).
+            process_device_description: Per-description callback. Returns True if the
+                description was cached successfully (controls whether the chunk is
+                persisted). Raising is treated like returning False for that description;
+                processing continues with the next description in the chunk.
+
+        """
+        device_groups: dict[str, list[DeviceDescription]] = defaultdict(list)
+        for dev_desc in descriptions:
+            owner = dev_desc.get("PARENT") or dev_desc["ADDRESS"]
+            device_groups[owner].append(dev_desc)
+
+        owners = list(device_groups.keys())
+        chunk_size = self._config_provider.config.device_creation_chunk_size
+        client = self._coordinator_provider.client_coordinator.get_client(interface_id=interface_id)
+        total_chunks = (len(owners) + chunk_size - 1) // chunk_size
+
+        for chunk_index in range(total_chunks):
+            chunk_owners = owners[chunk_index * chunk_size : (chunk_index + 1) * chunk_size]
+            chunk_descriptions = [d for owner in chunk_owners for d in device_groups[owner]]
+
             save_descriptions = False
-            for dev_desc in descriptions_to_cache:
+            for dev_desc in chunk_descriptions:
                 try:
-                    self._coordinator_provider.cache_coordinator.device_descriptions.add_device(
-                        interface_id=interface_id, device_description=dev_desc
-                    )
-                    # Register interface for device address so Device.interface is correct.
-                    # This is critical for JSON-RPC-only backends (CUxD, CCU-Jack) where
-                    # fetch_device_details() returns None and interface would default to BIDCOS_RF.
-                    self._coordinator_provider.cache_coordinator.device_details.add_interface(
-                        address=dev_desc["ADDRESS"], interface=client.interface
-                    )
-                    # Only fetch paramset descriptions for new devices (not needed for refresh)
-                    if source != SourceOfDeviceCreation.REFRESH or dev_desc in new_device_descriptions:
-                        await client.fetch_paramset_descriptions(device_description=dev_desc)
-                    save_descriptions = True
-                except Exception as exc:  # noqa: BLE001 - per-device update; skip this device and continue batch  # pragma: no cover
+                    if await process_device_description(dev_desc):
+                        save_descriptions = True
+                except Exception as exc:  # noqa: BLE001 - per-device; skip this device and continue chunk  # pragma: no cover
                     save_descriptions = False
                     _LOGGER.error(  # i18n-log: ignore
                         "UPDATE_CACHES_WITH_NEW_DEVICES failed: %s [%s]",
@@ -1081,7 +1203,7 @@ class DeviceCoordinator(FirmwareDataRefresherProtocol):
                         extract_exc_args(exc=exc),
                     )
 
-            # Emit event ONCE after batch to trigger automatic cache persistence
+            # Emit event ONCE per chunk to trigger automatic cache persistence
             if save_descriptions:
                 await self._event_bus_provider.event_bus.publish(
                     event=DataFetchCompletedEvent(
@@ -1096,9 +1218,6 @@ class DeviceCoordinator(FirmwareDataRefresherProtocol):
                 save_paramset_descriptions=save_descriptions,
             )
 
-            # Device creation MUST be inside semaphore to prevent race condition:
-            # Without this, startup code can call check_for_new_device_addresses()
-            # while callback is still adding descriptions, causing incomplete devices.
             if new_device_addresses := self.check_for_new_device_addresses(interface_id=interface_id):
                 await self._coordinator_provider.cache_coordinator.device_details.load()
                 await self._coordinator_provider.cache_coordinator.load_data_cache(interface=client.interface)
@@ -1107,6 +1226,14 @@ class DeviceCoordinator(FirmwareDataRefresherProtocol):
                     interface_id=interface_id,
                     new_device_addresses=new_device_addresses,
                 )
+
+            _LOGGER.debug(
+                "ADD_NEW_DEVICES: Completed chunk %d/%d (%d device(s)) for interface_id %s",
+                chunk_index + 1,
+                total_chunks,
+                len(chunk_owners),
+                interface_id,
+            )
 
     async def _check_paramset_consistency(
         self,

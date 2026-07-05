@@ -28,6 +28,7 @@ _TEST_SPEEDUP: Final = (
 
 # default
 DEFAULT_DELAY_NEW_DEVICE_CREATION: Final = False
+DEFAULT_DEVICE_CREATION_CHUNK_SIZE: Final = 10
 DEFAULT_ENABLE_DEVICE_FIRMWARE_CHECK: Final = False
 DEFAULT_ENABLE_PROGRAM_SCAN: Final = True
 DEFAULT_ENABLE_SYSVAR_SCAN: Final = True
@@ -109,6 +110,12 @@ class TimeoutConfig(BaseModel):
 
     startup_max_init_retry_delay: float = 5 if _TEST_SPEEDUP else 30
     """Maximum delay between startup initialization retry attempts after backoff (default: 30s)."""
+
+    device_sync_max_attempts: int = 3
+    """Maximum attempts to fetch paramset descriptions for one device before giving up (default: 3)."""
+
+    device_sync_initial_retry_delay: float = 0.5 if _TEST_SPEEDUP else 2
+    """Initial delay before retrying a failed paramset description fetch (default: 2s)."""
 
     command_throttle_interval: float = 0.0
     """Minimum interval between consecutive device commands per interface (default: 0.0 = disabled).

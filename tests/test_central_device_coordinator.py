@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from aiohomematic.central.coordinators import DeviceCoordinator
-from aiohomematic.const import DeviceDescription, SourceOfDeviceCreation
+from aiohomematic.const import DeviceDescription, SourceOfDeviceCreation, TimeoutConfig
 
 
 class _FakeChannel:
@@ -258,6 +258,8 @@ class _FakeConfig:
     def __init__(self) -> None:
         """Initialize a fake config."""
         self.delay_new_device_creation = False
+        self.device_creation_chunk_size = 10
+        self.timeout_config = TimeoutConfig()
 
 
 class _FakeCentral:
@@ -1619,7 +1621,9 @@ class TestDeviceCoordinatorCreateDevicesInterruption:
     Regression guard for issue #3213: when device creation is interrupted by a
     ``CancelledError`` (e.g. Home Assistant cancelling a slow config-entry setup, or the
     event loop being blocked past its timeout), creation must not fail silently. The
-    interruption is logged and propagates; already-built devices are not dispatched.
+    interruption is logged and propagates; already-built devices are not dispatched, and any
+    partial registry entries from the interrupted run are rolled back so the device is
+    treated as pending again on the next attempt instead of being permanently stranded.
     """
 
     @pytest.mark.asyncio
@@ -1694,5 +1698,67 @@ class TestDeviceCoordinatorCreateDevicesInterruption:
         # Already-built devices were NOT dispatched to consumers (no DEVICES_CREATED event).
         central.event_coordinator.publish_system_event.assert_not_called()  # type: ignore[attr-defined]
 
-        # Exactly one device made it into the registry before the interruption (stranded).
+        # The one device that made it into the registry before the interruption was rolled
+        # back - nothing is left stranded.
+        assert len(central.device_registry.get_device_addresses()) == 0
+
+    @pytest.mark.asyncio
+    async def test_create_devices_retry_succeeds_after_rollback(self, caplog: pytest.LogCaptureFixture) -> None:
+        """After an interrupted run rolls back, a retry for the same address succeeds."""
+        coordinator, central = _make_create_devices_coordinator()
+
+        add_calls = {"count": 0}
+        real_add = central.device_registry.add_device
+
+        async def _add_device_then_cancel_once(*, device: object) -> None:
+            add_calls["count"] += 1
+            if add_calls["count"] == 1:
+                raise asyncio.CancelledError
+            await real_add(device=device)  # type: ignore[arg-type]
+
+        central.device_registry.add_device = _add_device_then_cancel_once  # type: ignore[assignment]
+
+        with (
+            patch(
+                "aiohomematic.central.coordinators.device.Device",
+                side_effect=lambda *, context: _BuildableDevice(
+                    address=context.device_address, interface_id=context.interface_id
+                ),
+            ),
+            patch("aiohomematic.central.coordinators.device.create_data_points_and_events"),
+            patch("aiohomematic.central.coordinators.device.create_custom_data_points"),
+            patch("aiohomematic.central.coordinators.device.create_week_profile_data_point"),
+            caplog.at_level(logging.WARNING, logger="aiohomematic.central.coordinators.device"),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await coordinator.create_devices(
+                new_device_addresses={"test-interface": {"VCU0000001"}},
+                source=SourceOfDeviceCreation.CACHE,
+            )
+
+        # Rolled back: not stranded, not dispatched.
+        assert len(central.device_registry.get_device_addresses()) == 0
+        central.event_coordinator.publish_system_event.assert_not_called()  # type: ignore[attr-defined]
+
+        # Retry for the same address now succeeds (proves the rollback made it retry-able,
+        # not just cleaned up).
+        with (
+            patch(
+                "aiohomematic.central.coordinators.device.Device",
+                side_effect=lambda *, context: _BuildableDevice(
+                    address=context.device_address, interface_id=context.interface_id
+                ),
+            ),
+            patch("aiohomematic.central.coordinators.device.create_data_points_and_events"),
+            patch("aiohomematic.central.coordinators.device.create_custom_data_points"),
+            patch("aiohomematic.central.coordinators.device.create_week_profile_data_point"),
+            patch("aiohomematic.central.coordinators.device._get_new_data_points", return_value={}),
+            patch("aiohomematic.central.coordinators.device._get_new_event_groups", return_value=()),
+        ):
+            await coordinator.create_devices(
+                new_device_addresses={"test-interface": {"VCU0000001"}},
+                source=SourceOfDeviceCreation.CACHE,
+            )
+
         assert len(central.device_registry.get_device_addresses()) == 1
+        central.event_coordinator.publish_system_event.assert_called_once()  # type: ignore[attr-defined]
