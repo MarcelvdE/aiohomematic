@@ -788,21 +788,27 @@ class CentralUnit(
             raise NoClientsException(i18n.tr(key="exception.central.validate_config.no_clients"))
 
         system_information = SystemInformation()
-        for interface_config in self._config.enabled_interface_configs:
-            try:
-                client = await hmcl.create_client(client_deps=self, interface_config=interface_config)
-            except BaseHomematicException as bhexc:
-                _LOGGER.error(
-                    i18n.tr(
-                        key="log.central.validate_config_and_get_system_information.client_failed",
-                        interface=str(interface_config.interface),
-                        reason=extract_exc_args(exc=bhexc),
+        clients: list[ClientProtocol] = []
+        try:
+            for interface_config in self._config.enabled_interface_configs:
+                try:
+                    client = await hmcl.create_client(client_deps=self, interface_config=interface_config)
+                except BaseHomematicException as bhexc:
+                    _LOGGER.error(
+                        i18n.tr(
+                            key="log.central.validate_config_and_get_system_information.client_failed",
+                            interface=str(interface_config.interface),
+                            reason=extract_exc_args(exc=bhexc),
+                        )
                     )
-                )
-                raise
-            if client.interface in PRIMARY_CLIENT_CANDIDATE_INTERFACES and not system_information.serial:
-                system_information = client.system_information
-        return system_information
+                    raise
+                clients.append(client)
+                if client.interface in PRIMARY_CLIENT_CANDIDATE_INTERFACES and not system_information.serial:
+                    system_information = client.system_information
+            return system_information
+        finally:
+            for client in clients:
+                await client.stop()
 
     def _build_degraded_interfaces_map(self) -> dict[str, FailureReason]:
         """Build map of disconnected interfaces with their failure reasons."""

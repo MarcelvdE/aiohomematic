@@ -41,9 +41,11 @@ _LOGGER: Final = logging.getLogger(__name__)
 #                    ├─────► DISCONNECTED (for graceful shutdown) ▲
 #                    └─────► RECONNECTING ────────────────────────┘
 #
-#   STOPPED ◄── STOPPING ◄─────────────────────────(from CONNECTED/DISCONNECTED/RECONNECTING)
+#   STOPPED ◄── STOPPING ◄─────────────────────────(from CONNECTED/DISCONNECTED/INITIALIZED)
 #
 #   Note: INITIALIZED → DISCONNECTED allows recovery reset when connection was never established
+#   Note: INITIALIZED → STOPPING allows releasing resources for clients that were created but
+#   never connected (e.g. validate_config_and_get_system_information())
 #
 _VALID_TRANSITIONS: Final[dict[ClientState, frozenset[ClientState]]] = {
     # Initial state after client creation - can only begin initialization
@@ -52,7 +54,9 @@ _VALID_TRANSITIONS: Final[dict[ClientState, frozenset[ClientState]]] = {
     ClientState.INITIALIZING: frozenset({ClientState.INITIALIZED, ClientState.FAILED}),
     # Initialization complete - ready to establish connection
     # DISCONNECTED allows reset for recovery when connection was never established
-    ClientState.INITIALIZED: frozenset({ClientState.CONNECTING, ClientState.DISCONNECTED}),
+    # STOPPING allows stop() to release resources for clients created but never connected
+    # (e.g. validate_config_and_get_system_information())
+    ClientState.INITIALIZED: frozenset({ClientState.CONNECTING, ClientState.DISCONNECTED, ClientState.STOPPING}),
     # Attempting to connect to backend - succeeds or fails
     ClientState.CONNECTING: frozenset({ClientState.CONNECTED, ClientState.FAILED}),
     # Fully connected and operational

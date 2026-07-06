@@ -28,6 +28,7 @@ from aiohomematic.const import (
     Parameter,
     ParamsetKey,
     SourceOfDeviceCreation,
+    SystemInformation,
 )
 from aiohomematic.exceptions import (
     AioHomematicConfigException,
@@ -1471,6 +1472,96 @@ class TestCentralValidation:
 
         with pytest.raises(MyBHE):
             await hmcu.CentralUnit.validate_config_and_get_system_information(central)
+
+    @pytest.mark.asyncio
+    async def test_validate_config_and_get_system_information_stops_all_clients_on_success(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """All clients created during validation should be stopped exactly once when validation succeeds."""
+        from unittest.mock import AsyncMock
+
+        central = hmcu.CentralUnit.__new__(hmcu.CentralUnit)  # type: ignore[call-arg]
+
+        @dataclass(frozen=True)
+        class DummyIfaceCfg:
+            interface: str
+            interface_id: str
+
+        class DummyConfig:
+            name = "central-test"
+            enabled_interface_configs = [
+                DummyIfaceCfg(interface="BidCos-RF", interface_id="if1"),
+                DummyIfaceCfg(interface="HmIP-RF", interface_id="if2"),
+            ]
+
+        central._config = DummyConfig()  # type: ignore[attr-defined]
+
+        created_clients: list[AsyncMock] = []
+
+        async def fake_create_client(*args: Any, **kwargs: Any) -> AsyncMock:
+            interface_config = kwargs["interface_config"]
+            client = AsyncMock()
+            client.interface = Interface.BIDCOS_RF if interface_config.interface == "BidCos-RF" else Interface.HMIP_RF
+            client.system_information = SystemInformation(serial=f"SN-{interface_config.interface_id}")
+            created_clients.append(client)
+            return client
+
+        monkeypatch.setattr(hmcl, "create_client", fake_create_client)
+
+        result = await hmcu.CentralUnit.validate_config_and_get_system_information(central)
+
+        assert len(created_clients) == 2
+        for client in created_clients:
+            client.stop.assert_awaited_once()
+        assert result.serial == "SN-if1"
+
+    @pytest.mark.asyncio
+    async def test_validate_config_and_get_system_information_stops_created_clients_on_failure(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Clients created before a later failure should still be stopped, and the exception should propagate."""
+        from unittest.mock import AsyncMock
+
+        central = hmcu.CentralUnit.__new__(hmcu.CentralUnit)  # type: ignore[call-arg]
+
+        @dataclass(frozen=True)
+        class DummyIfaceCfg:
+            interface: str
+            interface_id: str
+
+        class DummyConfig:
+            name = "central-test"
+            enabled_interface_configs = [
+                DummyIfaceCfg(interface="BidCos-RF", interface_id="if1"),
+                DummyIfaceCfg(interface="HmIP-RF", interface_id="if2"),
+            ]
+
+        central._config = DummyConfig()  # type: ignore[attr-defined]
+
+        class MyBHE(BaseHomematicException):
+            name = "BHE"
+
+        created_clients: list[AsyncMock] = []
+
+        async def fake_create_client(*args: Any, **kwargs: Any) -> AsyncMock:
+            interface_config = kwargs["interface_config"]
+            if interface_config.interface == "HmIP-RF":
+                raise MyBHE("fail")
+            client = AsyncMock()
+            client.interface = Interface.BIDCOS_RF
+            client.system_information = SystemInformation(serial=f"SN-{interface_config.interface_id}")
+            created_clients.append(client)
+            return client
+
+        monkeypatch.setattr(hmcl, "create_client", fake_create_client)
+
+        with pytest.raises(MyBHE):
+            await hmcu.CentralUnit.validate_config_and_get_system_information(central)
+
+        assert len(created_clients) == 1
+        created_clients[0].stop.assert_awaited_once()
 
 
 class TestCentralDeviceCreation:
