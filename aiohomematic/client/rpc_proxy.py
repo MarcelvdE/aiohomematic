@@ -544,21 +544,26 @@ class AioXmlRpcProxy(BaseRpcProxy, xmlrpc.client.ServerProxy):
             )
             raise ClientException(terr) from terr
         except xmlrpc.client.ProtocolError as perr:
+            self._circuit_breaker.record_failure()
+            # Only record a fresh incident/log entry on the first occurrence of an
+            # already-known connection issue, to avoid duplicate noise. The exception
+            # itself must always be raised below, regardless of is_issue, otherwise the
+            # caller silently receives None instead of an error (see incident history).
             if not self._connection_state.is_issue(issuer=self, iid=self._interface_id):
                 self._record_rpc_error_incident(
                     method=str(args[0]),
                     error_type="ProtocolError",
                     error_message=perr.errmsg,
                 )
-                if perr.errmsg == "Unauthorized":
-                    raise AuthFailure(perr) from perr
-                raise NoConnectionException(
-                    i18n.tr(
-                        key="exception.client.xmlrpc.no_connection_with_reason",
-                        context=str(self.log_context),
-                        reason=perr.errmsg,
-                    )
-                ) from perr
+            if perr.errmsg == "Unauthorized":
+                raise AuthFailure(perr) from perr
+            raise NoConnectionException(
+                i18n.tr(
+                    key="exception.client.xmlrpc.no_connection_with_reason",
+                    context=str(self.log_context),
+                    reason=perr.errmsg,
+                )
+            ) from perr
         except http.client.ImproperConnectionState as icserr:
             # HTTP connection state errors (ResponseNotReady, CannotSendRequest, etc.)
             # These indicate the connection is in an inconsistent state and should be retried

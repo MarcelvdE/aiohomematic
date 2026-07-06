@@ -912,16 +912,6 @@ class ClimateWeekProfile(WeekProfile[ClimateSchedule]):
     """
 
     _data_point: BaseCustomDpClimate
-    __slots__ = (
-        "_max_temp",
-        "_min_temp",
-    )
-
-    def __init__(self, *, data_point: CustomDataPointProtocol) -> None:
-        """Initialize the climate week profile."""
-        super().__init__(data_point=data_point)
-        self._min_temp: Final[float] = self._data_point.min_temp
-        self._max_temp: Final[float] = self._data_point.max_temp
 
     @staticmethod
     def _create_empty_schedule() -> ClimateSchedule:
@@ -1029,8 +1019,12 @@ class ClimateWeekProfile(WeekProfile[ClimateSchedule]):
         # Cast to ClimateScheduleDictInternal since we built it with all required keys
         return cast(_ClimateScheduleDictInternal, schedule_data)
 
-    max_temp: Final = DelegatedProperty[float](path="_max_temp", kind=Kind.CONFIG)
-    min_temp: Final = DelegatedProperty[float](path="_min_temp", kind=Kind.CONFIG)
+    # Delegated live to the data point rather than snapshotted at __init__ time: if the
+    # device's MASTER paramset could not be loaded from the CCU at startup, min_temp/max_temp
+    # fall back to defaults (see BaseCustomDpClimate.min_temp/max_temp). Snapshotting would
+    # freeze those defaults even after the paramset is successfully reloaded later.
+    max_temp: Final = DelegatedProperty[float](path="_data_point.max_temp", kind=Kind.CONFIG)
+    min_temp: Final = DelegatedProperty[float](path="_data_point.min_temp", kind=Kind.CONFIG)
 
     @property
     def available_profiles(self) -> tuple[ScheduleProfile, ...]:
@@ -1375,13 +1369,13 @@ class ClimateWeekProfile(WeekProfile[ClimateSchedule]):
             for p in validated_weekday.periods
         ]
 
-        if not self._min_temp <= base_temperature <= self._max_temp:
+        if not self.min_temp <= base_temperature <= self.max_temp:
             raise ValidationException(
                 i18n.tr(
                     key="exception.model.week_profile.validate.base_temperature_out_of_range",
                     base_temperature=base_temperature,
-                    min=self._min_temp,
-                    max=self._max_temp,
+                    min=self.min_temp,
+                    max=self.max_temp,
                 )
             )
 
@@ -1409,13 +1403,13 @@ class ClimateWeekProfile(WeekProfile[ClimateSchedule]):
                     )
                 )
 
-            if not self._min_temp <= temperature <= self._max_temp:
+            if not self.min_temp <= temperature <= self.max_temp:
                 raise ValidationException(
                     i18n.tr(
                         key="exception.model.week_profile.validate.temperature_out_of_range_for_times",
                         temperature=temperature,
-                        min=self._min_temp,
-                        max=self._max_temp,
+                        min=self.min_temp,
+                        max=self.max_temp,
                         start=starttime,
                         end=endtime,
                     )
@@ -1454,13 +1448,13 @@ class ClimateWeekProfile(WeekProfile[ClimateSchedule]):
         # filter out irrelevant entries
         filtered_data = _filter_weekday_entries(weekday_data=weekday_data)
 
-        if not self._min_temp <= float(base_temperature) <= self._max_temp:
+        if not self.min_temp <= float(base_temperature) <= self.max_temp:
             raise ValidationException(
                 i18n.tr(
                     key="exception.model.week_profile.validate.base_temperature_out_of_range",
                     base_temperature=base_temperature,
-                    min=self._min_temp,
-                    max=self._max_temp,
+                    min=self.min_temp,
+                    max=self.max_temp,
                 )
             )
 

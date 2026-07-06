@@ -196,8 +196,9 @@ class IncidentStore(BasePersistentCache, IncidentRecorderProtocol):
         """
         Record a new incident and persist it.
 
-        The incident is saved to disk automatically (debounced).
-        Does NOT load historical incidents - only adds to current session.
+        The incident is saved to disk automatically (debounced). Historical incidents are
+        loaded from disk first (once per store lifetime, via _ensure_loaded), so persisting
+        does not overwrite incidents recorded in previous sessions.
 
         Args:
             incident_type: Type of incident.
@@ -211,6 +212,10 @@ class IncidentStore(BasePersistentCache, IncidentRecorderProtocol):
             The created IncidentSnapshot.
 
         """
+        # Load historical incidents first, otherwise persisting below would overwrite the
+        # on-disk history with only this session's in-memory incidents.
+        await self._ensure_loaded()
+
         # Generate unique incident ID
         incident_id = f"{incident_type.value}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
 

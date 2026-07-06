@@ -54,6 +54,7 @@ from aiohomematic.type_aliases import UnsubscribeCallback
 _LOGGER: Final = logging.getLogger(__name__)
 
 _CLOSED_LEVEL: Final = 0.0
+_DEFAULT_MAXIMUM_TEMPERATURE: Final = 30.5
 _DEFAULT_TEMPERATURE_STEP: Final = 0.5
 _OFF_TEMPERATURE: Final = 4.5
 _PARTY_DATE_FORMAT: Final = "%Y_%m_%d %H:%M"
@@ -264,10 +265,18 @@ class BaseCustomDpClimate(CustomDataPoint):
 
     @config_property
     def max_temp(self) -> float:
-        """Return the maximum temperature."""
+        """
+        Return the maximum temperature.
+
+        Falls back to the HmIP default upper bound (30.5 °C) when neither the
+        TEMPERATURE_MAXIMUM data point nor the setpoint's MAX are available (e.g. the
+        channel's MASTER paramset could not be loaded from the CCU during startup).
+        """
         if self._dp_temperature_maximum.value is not None:
             return float(self._dp_temperature_maximum.value)
-        return cast(float, self._dp_setpoint.max)
+        if (setpoint_max := self._dp_setpoint.max) is not None:
+            return float(setpoint_max)
+        return _DEFAULT_MAXIMUM_TEMPERATURE
 
     @state_property
     def min_max_value_not_relevant_for_manu_mode(self) -> bool:
@@ -278,11 +287,21 @@ class BaseCustomDpClimate(CustomDataPoint):
 
     @config_property
     def min_temp(self) -> float:
-        """Return the minimum temperature."""
+        """
+        Return the minimum temperature.
+
+        Falls back to the OFF sentinel (4.5 °C) when neither the TEMPERATURE_MINIMUM
+        data point nor the setpoint's MIN are available (e.g. the channel's MASTER
+        paramset could not be loaded from the CCU during startup). 0.0 °C was used
+        previously, but no real HmIP thermostat allows a heating setpoint that low, so
+        it produced an unrealistically wide valid range. Using the OFF sentinel here
+        means the existing bump-away-from-OFF logic below applies, yielding the same
+        5.0 °C default a real device reports when its minimum equals the OFF value.
+        """
         if self._dp_temperature_minimum.value is not None:
             min_temp = float(self._dp_temperature_minimum.value)
         else:
-            min_temp = float(self._dp_setpoint.min) if self._dp_setpoint.min is not None else 0.0
+            min_temp = float(self._dp_setpoint.min) if self._dp_setpoint.min is not None else _OFF_TEMPERATURE
 
         if min_temp == _OFF_TEMPERATURE:
             return min_temp + _DEFAULT_TEMPERATURE_STEP

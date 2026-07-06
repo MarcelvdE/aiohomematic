@@ -507,7 +507,10 @@ class AioJsonRpcAioHttpClient(LogContextMixin):
         if self._last_session_id_refresh is None:
             return False
         delta = datetime.now() - self._last_session_id_refresh
-        return delta.seconds < JSON_SESSION_AGE
+        # timedelta.seconds ignores the .days component, so it wraps every 24h and would
+        # report a session refreshed a week ago as "recent". total_seconds() accounts for
+        # the full elapsed duration.
+        return delta.total_seconds() < JSON_SESSION_AGE
 
     @property
     def is_activated(self) -> bool:

@@ -77,6 +77,7 @@ from aiohomematic.const import (
     RecoveryStage,
     get_json_rpc_default_port,
 )
+from aiohomematic.exceptions import AioHomematicException
 from aiohomematic.metrics._protocols import RecoveryProviderForMetricsProtocol
 from aiohomematic.store.types import IncidentSeverity, IncidentType
 
@@ -1193,10 +1194,18 @@ class ConnectionRecoveryCoordinator(RecoveryProviderForMetricsProtocol):
             )
         )
 
-        # Clear JSON-RPC session to force re-authentication
-        # This prevents auth errors from stale sessions during recovery
-        if client := self._client_provider.get_client(interface_id=interface_id):
-            client.clear_json_rpc_session()
+        try:
+            # Clear JSON-RPC session to force re-authentication
+            # This prevents auth errors from stale sessions during recovery
+            if client := self._client_provider.get_client(interface_id=interface_id):
+                client.clear_json_rpc_session()
+        except AioHomematicException:
+            # No client yet (e.g. recovery triggered before the initial connect completed).
+            # _active_recoveries is cleared in the finally block below either way.
+            _LOGGER.debug(  # i18n-log: ignore
+                "CONNECTION_RECOVERY: No client for %s yet, skipping session clear",
+                interface_id,
+            )
 
         try:
             async with self._recovery_semaphore:
