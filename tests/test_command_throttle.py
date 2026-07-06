@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from aiohomematic.client import CommandPriority, CommandThrottle, InterfaceClient, InterfaceConfig
-from aiohomematic.const import Interface, ParamsetKey, TimeoutConfig
+from aiohomematic.const import ClientState, Interface, ParamsetKey, TimeoutConfig
 from aiohomematic.exceptions import CommandSupersededError
 
 
@@ -1060,6 +1060,38 @@ class TestCommandThrottleStop:
         assert throttle._stopped is False
         throttle.stop()
         assert throttle._stopped is True
+
+    @pytest.mark.asyncio
+    async def test_interface_client_stop_cancels_command_throttle_worker(self) -> None:
+        """
+        Regression test: InterfaceClient.stop() must cancel the CommandThrottle worker task.
+
+        Previously, InterfaceClient.stop() never called self._command_throttle.stop(),
+        so the background worker task started in CommandThrottle.__init__() leaked for
+        every stopped client (including temporary clients created during config-flow
+        validation).
+        """
+        client, _backend = _create_throttled_client(throttle_interval=0.05)
+        throttle = client.command_throttle
+
+        assert throttle._worker_task is not None
+        assert not throttle._worker_task.done()
+
+        # Move the state machine into a state from which stop() is a valid transition,
+        # without exercising the full init/connect flow (not supported by the fake backend
+        # used here).
+        client.state_machine.transition_to(target=ClientState.INITIALIZING, reason="test setup")
+        client.state_machine.transition_to(target=ClientState.INITIALIZED, reason="test setup")
+        client.state_machine.transition_to(target=ClientState.CONNECTING, reason="test setup")
+        client.state_machine.transition_to(target=ClientState.CONNECTED, reason="test setup")
+
+        await client.stop()
+
+        # Allow the cancellation to propagate through the event loop.
+        await asyncio.sleep(0.01)
+
+        assert throttle._stopped is True
+        assert throttle._worker_task.done()
 
 
 class TestCommandThrottlePurge:
