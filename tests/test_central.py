@@ -2328,6 +2328,26 @@ class TestCentralStartAlreadyRunning:
         await central.stop()
         assert central.state == CentralState.STOPPED
 
+    @pytest.mark.asyncio
+    async def test_concurrent_stop_calls_are_safe(
+        self,
+        factory_with_homegear_client: FactoryWithClient,
+    ) -> None:
+        """Concurrent stop() calls must not raise and must only tear down the central once."""
+        from aiohomematic.const import CentralState
+
+        central = await factory_with_homegear_client.init().get_default_central()
+        clients = central.client_coordinator.clients
+        assert clients
+
+        results = await asyncio.gather(central.stop(), central.stop(), return_exceptions=True)
+
+        for result in results:
+            assert result is None
+        assert central.state == CentralState.STOPPED
+        for client in clients:
+            client.stop.assert_awaited_once()
+
 
 class TestCentralRenameDeviceFailure:
     """Test rename_device when client.rename_device returns False."""

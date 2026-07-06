@@ -301,6 +301,7 @@ class CentralUnit(
         self._rpc_callback_ip: str = IP_ANY_V4
         self._listen_ip_addr: str = IP_ANY_V4
         self._listen_port_xml_rpc: int = PORT_ANY
+        self._stop_lock: Final = asyncio.Lock()
 
     async def __aenter__(self) -> Self:
         """Start the central unit (async context manager entry)."""
@@ -691,96 +692,99 @@ class CentralUnit(
 
     async def stop(self) -> None:
         """Stop processing of the central unit."""
-        _LOGGER.debug("STOP: Central %s is %s", self.name, self.state)
-        if self.state == CentralState.STOPPED:
-            _LOGGER.debug("STOP: Central %s is already stopped", self.name)
-            return
+        async with self._stop_lock:
+            _LOGGER.debug("STOP: Central %s is %s", self.name, self.state)
+            if self.state == CentralState.STOPPED:
+                _LOGGER.debug("STOP: Central %s is already stopped", self.name)
+                return
 
-        # Transition to STOPPED directly (no intermediate STOPPING state in CentralState)
-        _LOGGER.debug("STOP: Stopping Central %s", self.name)
+            # Transition to STOPPED directly (no intermediate STOPPING state in CentralState)
+            _LOGGER.debug("STOP: Stopping Central %s", self.name)
 
-        await self.save_files(save_device_descriptions=True, save_paramset_descriptions=True)
-        await self._stop_scheduler()
-        self._metrics_observer.stop()
-        self._connection_recovery_coordinator.stop()
-        await self._client_coordinator.stop_clients()
-        if self._json_rpc_client.is_activated:
-            await self._json_rpc_client.logout()
-            await self._json_rpc_client.stop()
+            await self.save_files(save_device_descriptions=True, save_paramset_descriptions=True)
+            await self._stop_scheduler()
+            self._metrics_observer.stop()
+            self._connection_recovery_coordinator.stop()
+            await self._client_coordinator.stop_clients()
+            if self._json_rpc_client.is_activated:
+                await self._json_rpc_client.logout()
+                await self._json_rpc_client.stop()
 
-        if self._xml_rpc_server:
-            # un-register this instance from XmlRPC-Server
-            self._xml_rpc_server.remove_central(central=self)
-            # un-register and stop XmlRPC-Server, if possible
-            if self._xml_rpc_server.no_central_assigned:
-                await self._xml_rpc_server.stop()
-            _LOGGER.debug("STOP: XmlRPC-Server stopped")
-        else:
-            _LOGGER.debug("STOP: shared XmlRPC-Server NOT stopped. There is still another central instance registered")
+            if self._xml_rpc_server:
+                # un-register this instance from XmlRPC-Server
+                self._xml_rpc_server.remove_central(central=self)
+                # un-register and stop XmlRPC-Server, if possible
+                if self._xml_rpc_server.no_central_assigned:
+                    await self._xml_rpc_server.stop()
+                _LOGGER.debug("STOP: XmlRPC-Server stopped")
+            else:
+                _LOGGER.debug(
+                    "STOP: shared XmlRPC-Server NOT stopped. There is still another central instance registered"
+                )
 
-        _LOGGER.debug("STOP: Removing instance")
-        CENTRAL_REGISTRY.unregister(name=self.name)
+            _LOGGER.debug("STOP: Removing instance")
+            CENTRAL_REGISTRY.unregister(name=self.name)
 
-        # Clear hub coordinator subscriptions (sysvar event subscriptions)
-        self._hub_coordinator.clear()
-        _LOGGER.debug("STOP: Hub coordinator subscriptions cleared")
+            # Clear hub coordinator subscriptions (sysvar event subscriptions)
+            self._hub_coordinator.clear()
+            _LOGGER.debug("STOP: Hub coordinator subscriptions cleared")
 
-        # Clear cache coordinator subscriptions (device removed event subscription)
-        self._cache_coordinator.stop()
-        _LOGGER.debug("STOP: Cache coordinator subscriptions cleared")
+            # Clear cache coordinator subscriptions (device removed event subscription)
+            self._cache_coordinator.stop()
+            _LOGGER.debug("STOP: Cache coordinator subscriptions cleared")
 
-        # Clear event coordinator subscriptions (status event subscriptions)
-        self._event_coordinator.clear()
-        _LOGGER.debug("STOP: Event coordinator subscriptions cleared")
+            # Clear event coordinator subscriptions (status event subscriptions)
+            self._event_coordinator.clear()
+            _LOGGER.debug("STOP: Event coordinator subscriptions cleared")
 
-        # Clear external subscriptions (from Home Assistant integration)
-        # These are subscriptions made via subscribe_to_device_removed(), subscribe_to_firmware_updated(), etc.
-        # The integration is responsible for unsubscribing, but we clean up as a fallback
-        self._event_coordinator.event_bus.clear_external_subscriptions()
-        _LOGGER.debug("STOP: External subscriptions cleared")
+            # Clear external subscriptions (from Home Assistant integration)
+            # These are subscriptions made via subscribe_to_device_removed(), subscribe_to_firmware_updated(), etc.
+            # The integration is responsible for unsubscribing, but we clean up as a fallback
+            self._event_coordinator.event_bus.clear_external_subscriptions()
+            _LOGGER.debug("STOP: External subscriptions cleared")
 
-        # Unsubscribe from system status events
-        self._unsubscribe_system_status()
-        _LOGGER.debug("STOP: Central system status subscription cleared")
+            # Unsubscribe from system status events
+            self._unsubscribe_system_status()
+            _LOGGER.debug("STOP: Central system status subscription cleared")
 
-        # Log any leaked subscriptions before clearing (only when debug logging is enabled)
-        if _LOGGER.isEnabledFor(logging.DEBUG):
-            self._event_coordinator.event_bus.log_leaked_subscriptions()
+            # Log any leaked subscriptions before clearing (only when debug logging is enabled)
+            if _LOGGER.isEnabledFor(logging.DEBUG):
+                self._event_coordinator.event_bus.log_leaked_subscriptions()
 
-        # Clear EventBus subscriptions to prevent memory leaks
-        self._event_coordinator.event_bus.clear_subscriptions()
-        _LOGGER.debug("STOP: EventBus subscriptions cleared")
+            # Clear EventBus subscriptions to prevent memory leaks
+            self._event_coordinator.event_bus.clear_subscriptions()
+            _LOGGER.debug("STOP: EventBus subscriptions cleared")
 
-        # Clear all in-memory caches (device_details, data_cache, parameter_visibility)
-        self._cache_coordinator.clear_on_stop()
-        _LOGGER.debug("STOP: In-memory caches cleared")
+            # Clear all in-memory caches (device_details, data_cache, parameter_visibility)
+            self._cache_coordinator.clear_on_stop()
+            _LOGGER.debug("STOP: In-memory caches cleared")
 
-        # Clear client-level trackers (command tracker, ping-pong tracker)
-        for client in self._client_coordinator.clients:
-            client.last_value_send_tracker.clear()
-            client.ping_pong_tracker.clear()
-        _LOGGER.debug("STOP: Client caches cleared")
+            # Clear client-level trackers (command tracker, ping-pong tracker)
+            for client in self._client_coordinator.clients:
+                client.last_value_send_tracker.clear()
+                client.ping_pong_tracker.clear()
+            _LOGGER.debug("STOP: Client caches cleared")
 
-        # cancel outstanding tasks to speed up teardown
-        self.looper.cancel_tasks()
-        # wait until tasks are finished (with wait_time safeguard)
-        await self.looper.block_till_done(wait_time=5.0)
+            # cancel outstanding tasks to speed up teardown
+            self.looper.cancel_tasks()
+            # wait until tasks are finished (with wait_time safeguard)
+            await self.looper.block_till_done(wait_time=5.0)
 
-        # Wait briefly for any auxiliary threads to finish without blocking forever
-        max_wait_seconds = 5.0
-        interval = 0.05
-        waited = 0.0
-        while self._has_active_threads and waited < max_wait_seconds:
-            await asyncio.sleep(interval)
-            waited += interval
-        _LOGGER.debug("STOP: Central %s is %s", self.name, self.state)
+            # Wait briefly for any auxiliary threads to finish without blocking forever
+            max_wait_seconds = 5.0
+            interval = 0.05
+            waited = 0.0
+            while self._has_active_threads and waited < max_wait_seconds:
+                await asyncio.sleep(interval)
+                waited += interval
+            _LOGGER.debug("STOP: Central %s is %s", self.name, self.state)
 
-        # Transition central state machine to STOPPED
-        if self._central_state_machine.can_transition_to(target=CentralState.STOPPED):
-            self._central_state_machine.transition_to(
-                target=CentralState.STOPPED,
-                reason="stop() completed",
-            )
+            # Transition central state machine to STOPPED
+            if self._central_state_machine.can_transition_to(target=CentralState.STOPPED):
+                self._central_state_machine.transition_to(
+                    target=CentralState.STOPPED,
+                    reason="stop() completed",
+                )
 
     async def validate_config_and_get_system_information(self) -> SystemInformation:
         """Validate the central configuration."""

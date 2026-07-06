@@ -312,7 +312,15 @@ class ClientCoordinator(ClientCoordinationProtocol, ClientProviderProtocol):
 
         for client in self._clients.values():
             _LOGGER.debug("STOP_CLIENTS: Stopping %s", client.interface_id)
-            await client.stop()
+            try:
+                await client.stop()
+            except Exception:
+                _LOGGER.exception(
+                    i18n.tr(
+                        key="log.central.stop_clients.client_stop_failed",
+                        interface_id=client.interface_id,
+                    )
+                )
 
         _LOGGER.debug("STOP_CLIENTS: Clearing existing clients.")
         self._clients.clear()

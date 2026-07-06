@@ -2,6 +2,7 @@
 # Copyright (c) 2021-2026
 """Tests for aiohomematic.central.client_coordinator."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -560,6 +561,66 @@ class TestClientCoordinatorLifecycle:
         # Clients should be cleared (use public API)
         assert not coordinator.has_clients
         assert coordinator.clients_started is False
+
+    @pytest.mark.asyncio
+    async def test_stop_clients_continues_after_one_client_raises(self) -> None:
+        """A failing client.stop() must not prevent other clients from being stopped."""
+        central = _FakeCentral()
+        coordinator = ClientCoordinator(
+            client_factory=central,
+            config_provider=central,
+            central_info=central,
+            coordinator_provider=central,
+            event_bus_provider=central,
+            health_tracker=central.health_tracker,
+            system_info_provider=central,
+        )  # type: ignore[arg-type]
+
+        client1 = _FakeClient(interface_id="BidCos-RF", interface=Interface.BIDCOS_RF)
+        client2 = _FakeClient(interface_id="HmIP-RF", interface=Interface.HMIP_RF)
+
+        # First client's stop() raises; second client's stop() should still be called.
+        client1.stop = AsyncMock(side_effect=RuntimeError("boom"))  # type: ignore[method-assign]
+        client2.stop = AsyncMock()  # type: ignore[method-assign]
+        client1.deinit_proxy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        client2.deinit_proxy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+        coordinator._clients["BidCos-RF"] = client1  # type: ignore[assignment]
+        coordinator._clients["HmIP-RF"] = client2  # type: ignore[assignment]
+        coordinator._clients_started = True
+
+        await coordinator.stop_clients()
+
+        client1.stop.assert_called_once()
+        client2.stop.assert_called_once()
+
+        # Clients should still be cleared despite the failure (use public API)
+        assert not coordinator.has_clients
+        assert coordinator.clients_started is False
+
+    @pytest.mark.asyncio
+    async def test_stop_clients_reraises_cancelled_error(self) -> None:
+        """A CancelledError from client.stop() must propagate, not be swallowed."""
+        central = _FakeCentral()
+        coordinator = ClientCoordinator(
+            client_factory=central,
+            config_provider=central,
+            central_info=central,
+            coordinator_provider=central,
+            event_bus_provider=central,
+            health_tracker=central.health_tracker,
+            system_info_provider=central,
+        )  # type: ignore[arg-type]
+
+        client1 = _FakeClient(interface_id="BidCos-RF", interface=Interface.BIDCOS_RF)
+        client1.stop = AsyncMock(side_effect=asyncio.CancelledError())  # type: ignore[method-assign]
+        client1.deinit_proxy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+        coordinator._clients["BidCos-RF"] = client1  # type: ignore[assignment]
+        coordinator._clients_started = True
+
+        with pytest.raises(asyncio.CancelledError):
+            await coordinator.stop_clients()
 
 
 class TestClientCoordinatorPrimaryClient:
