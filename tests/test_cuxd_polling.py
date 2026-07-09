@@ -291,7 +291,9 @@ class TestCuxdInterfaceRegistration:
 
         cache = DeviceDetailsCache(
             central_info=mock_central_info,
+            config_provider=MagicMock(),
             primary_client_provider=mock_primary_client_provider,
+            storage=MagicMock(),
         )
 
         # Simulate device addresses
@@ -332,7 +334,9 @@ class TestCuxdInterfaceRegistration:
 
         cache = DeviceDetailsCache(
             central_info=mock_central_info,
+            config_provider=MagicMock(),
             primary_client_provider=mock_primary_client_provider,
+            storage=MagicMock(),
         )
 
         # Register interface for CUxD device
@@ -352,7 +356,9 @@ class TestCuxdInterfaceRegistration:
 
         cache = DeviceDetailsCache(
             central_info=mock_central_info,
+            config_provider=MagicMock(),
             primary_client_provider=mock_primary_client_provider,
+            storage=MagicMock(),
         )
 
         # Unknown address returns default BIDCOS_RF
@@ -432,7 +438,9 @@ class TestFetchDeviceDetailsInterfaceHandling:
 
         cache = DeviceDetailsCache(
             central_info=mock_central_info,
+            config_provider=MagicMock(),
             primary_client_provider=mock_primary_client_provider,
+            storage=MagicMock(),
         )
         mock_central.cache_coordinator.device_details = cache
         mock_central.cache_coordinator.device_descriptions.get_device_descriptions.return_value = {}
@@ -476,7 +484,9 @@ class TestFetchDeviceDetailsInterfaceHandling:
 
         cache = DeviceDetailsCache(
             central_info=mock_central_info,
+            config_provider=MagicMock(),
             primary_client_provider=mock_primary_client_provider,
+            storage=MagicMock(),
         )
         mock_central.cache_coordinator.device_details = cache
         mock_central.cache_coordinator.device_descriptions.get_device_descriptions.return_value = {}
@@ -520,7 +530,9 @@ class TestFetchDeviceDetailsInterfaceHandling:
 
         cache = DeviceDetailsCache(
             central_info=mock_central_info,
+            config_provider=MagicMock(),
             primary_client_provider=mock_primary_client_provider,
+            storage=MagicMock(),
         )
         mock_central.cache_coordinator.device_details = cache
         mock_central.cache_coordinator.device_descriptions.get_device_descriptions.return_value = {}

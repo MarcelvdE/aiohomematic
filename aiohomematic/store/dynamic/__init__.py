@@ -17,6 +17,8 @@ Key behaviors
 -------------
 - Stores are intentionally ephemeral and cleared/aged according to rules
 - Memory footprint is kept predictable while improving responsiveness
+- DeviceDetailsCache is the exception: it additionally persists its content to
+  disk so warm restarts avoid re-fetching CCU-wide device metadata
 
 Public API
 ----------

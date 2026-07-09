@@ -63,7 +63,9 @@ class TestDataPointCallbacks:
             handler=lambda *, event: device_updated_mock(data_point=switch),
         )
         assert switch.value is None
-        assert str(switch) == "path: device/status/VCU2128127/4/SWITCH, name: HmIP-BSM_VCU2128127"
+        # Real name from the session fixture, fetched via the details cache's eager
+        # refresh for new devices - not the auto-generated fallback.
+        assert str(switch) == "path: device/status/VCU2128127/4/SWITCH, name: HmIP-BSM VCU2128127"
         await central.event_coordinator.data_point_event(
             interface_id=const.INTERFACE_ID, channel_address="VCU2128127:4", parameter="STATE", value=1
         )
@@ -129,7 +131,9 @@ class TestDataPointCallbacks:
             handler=lambda *, event: device_updated_mock(data_point=switch),
         )
         assert switch.value is None
-        assert str(switch) == "path: device/status/VCU2128127/4/STATE, name: HmIP-BSM_VCU2128127 State ch4"
+        # Real name from the session fixture, fetched via the details cache's eager
+        # refresh for new devices - not the auto-generated fallback.
+        assert str(switch) == "path: device/status/VCU2128127/4/STATE, name: HmIP-BSM VCU2128127 State ch4"
         await central.event_coordinator.data_point_event(
             interface_id=const.INTERFACE_ID, channel_address="VCU2128127:4", parameter="STATE", value=1
         )

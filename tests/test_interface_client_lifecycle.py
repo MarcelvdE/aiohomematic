@@ -1872,6 +1872,33 @@ class TestStop:
         assert client.state == ClientState.STOPPED
 
     @pytest.mark.asyncio
+    async def test_stop_is_idempotent(self) -> None:
+        """Calling stop() a second time on an already-stopped client should be a silent no-op."""
+        central = _FakeCentral()
+        backend = _FakeBackend()
+        stop_called: list[bool] = []
+        original_stop = backend.stop
+
+        async def _tracking_stop() -> None:
+            stop_called.append(True)
+            await original_stop()
+
+        backend.stop = _tracking_stop  # type: ignore[method-assign]
+        client = _create_interface_client(central, backend)
+
+        await client.init_client()
+        await client.init_proxy()
+
+        await client.stop()
+        assert client.state == ClientState.STOPPED
+        assert len(stop_called) == 1
+
+        # Second call must not raise and must not re-run teardown logic.
+        await client.stop()
+        assert client.state == ClientState.STOPPED
+        assert len(stop_called) == 1
+
+    @pytest.mark.asyncio
     async def test_stop_transitions_to_stopped(self) -> None:
         """stop() should transition state to STOPPED after being connected."""
         client = _create_interface_client()
@@ -1906,33 +1933,6 @@ class TestStop:
 
         # Both subscriptions (state_change + system_status) should be unsubscribed
         assert len(unsubscribe_calls) == 2
-
-    @pytest.mark.asyncio
-    async def test_stop_is_idempotent(self) -> None:
-        """Calling stop() a second time on an already-stopped client should be a silent no-op."""
-        central = _FakeCentral()
-        backend = _FakeBackend()
-        stop_called: list[bool] = []
-        original_stop = backend.stop
-
-        async def _tracking_stop() -> None:
-            stop_called.append(True)
-            await original_stop()
-
-        backend.stop = _tracking_stop  # type: ignore[method-assign]
-        client = _create_interface_client(central, backend)
-
-        await client.init_client()
-        await client.init_proxy()
-
-        await client.stop()
-        assert client.state == ClientState.STOPPED
-        assert len(stop_called) == 1
-
-        # Second call must not raise and must not re-run teardown logic.
-        await client.stop()
-        assert client.state == ClientState.STOPPED
-        assert len(stop_called) == 1
 
 
 class TestMarkAllDevicesForcedAvailability:

@@ -282,6 +282,7 @@ CONF_USERNAME: Final = "username"
 DATETIME_FORMAT: Final = "%d.%m.%Y %H:%M:%S"
 DATETIME_FORMAT_MILLIS: Final = "%d.%m.%Y %H:%M:%S.%f'"
 DUMMY_SERIAL: Final = "SN0815"
+FILE_DEVICE_DETAILS: Final = "homematic_device_details"
 FILE_DEVICES: Final = "homematic_devices"
 FILE_INCIDENTS: Final = "homematic_incidents"
 FILE_PARAMSETS: Final = "homematic_paramsets"
@@ -313,6 +314,11 @@ COMMAND_TRACKER_WARNING_THRESHOLD: Final = 400  # Log warning when approaching l
 PING_PONG_CACHE_MAX_SIZE: Final = 100  # Maximum entries in ping/pong cache per interface
 LOCAL_HOST: Final = "127.0.0.1"
 MAX_CACHE_AGE: Final = 10
+# Freshness TTL for the device details cache (names/rooms/functions fetched via
+# Device.listAllDetail, Room.getAll and Subsection.getAll). These are CCU-wide
+# JSON-RPC calls without any filter parameter, and the metadata rarely changes,
+# so it is refreshed far less often than parameter values (MAX_CACHE_AGE).
+DEVICE_DETAILS_MAX_CACHE_AGE: Final = 300
 MAX_CONCURRENT_HTTP_SESSIONS: Final = 3
 MAX_RPC_BACKGROUND_TASKS: Final = 10000
 MAX_WAIT_FOR_CALLBACK: Final = 60

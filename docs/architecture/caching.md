@@ -9,7 +9,7 @@ The caching system is organized into three tiers:
 | Tier           | Storage     | Purpose                   | Survives Restart |
 | -------------- | ----------- | ------------------------- | ---------------- |
 | **Persistent** | Disk (JSON) | Device/paramset metadata  | Yes              |
-| **Dynamic**    | Memory      | Runtime values, commands  | No               |
+| **Dynamic**    | Memory      | Runtime values, commands  | No (exception: device details, see below) |
 | **Visibility** | Memory      | Parameter filtering rules | No               |
 
 ## Persistent Caches
@@ -76,13 +76,23 @@ Caches device parameter values for fast access.
 
 ### Device Details Cache
 
-Caches enriched device metadata (names, rooms, functions).
+Caches enriched device metadata (names, ReGa ids, rooms, functions).
 
-| Setting          | Value                                  |
-| ---------------- | -------------------------------------- |
-| Refresh Interval | 15 seconds                             |
-| Source           | Rega script calls                      |
-| Contents         | Human-readable names, room assignments |
+| Setting       | Value                                                          |
+| ------------- | -------------------------------------------------------------- |
+| Freshness TTL | 300 seconds (`DEVICE_DETAILS_MAX_CACHE_AGE`)                   |
+| Source        | JSON-RPC `Device.listAllDetail`, `Room.getAll`, `Subsection.getAll` |
+| Contents      | Human-readable names, ReGa ids, room/function assignments      |
+| Persistence   | Disk (`{central}_homematic_device_details.json`)               |
+
+These backend calls are CCU-wide (they accept no filter parameter), so the cache
+deliberately refreshes far less often than parameter values. `refresh()` no-ops
+while the cache is fresh; device creation forces a fetch only when a new device's
+name is missing. The content is persisted to disk: a warm restart loads the last
+known metadata immediately and refreshes it in the background instead of blocking
+startup on the CCU. The 15-second `periodic_refresh_interval` tick only refreshes
+**values** for polled interfaces (CUxD/CCU-Jack); it does not re-fetch metadata
+while the details cache is fresh.
 
 ### Command Tracker
 
@@ -249,6 +259,7 @@ The `CacheCoordinator` manages all caches centrally.
 ```python
 # Expiration
 MAX_CACHE_AGE = 10                          # Data cache (seconds)
+DEVICE_DETAILS_MAX_CACHE_AGE = 300          # Device details cache (seconds)
 LAST_COMMAND_SEND_STORE_TIMEOUT = 60        # Command tracker (seconds)
 PING_PONG_MISMATCH_COUNT_TTL = 300          # Ping/pong (seconds)
 
@@ -259,7 +270,7 @@ PING_PONG_CACHE_MAX_SIZE = 100
 INCIDENT_STORE_MAX_PER_TYPE = 20
 
 # Refresh intervals
-periodic_refresh_interval = 15              # Device details (seconds)
+periodic_refresh_interval = 15              # Value polling for CUxD/CCU-Jack (seconds)
 ```
 
 ## Best Practices

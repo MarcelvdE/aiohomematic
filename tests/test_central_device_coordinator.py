@@ -223,6 +223,7 @@ class _FakeCacheCoordinator:
         self.data_cache = MagicMock()
         self.parameter_visibility = MagicMock()
         self.paramset_descriptions = MagicMock()
+        self.load_data_cache = AsyncMock()
         self.remove_device_from_caches = MagicMock()
         self.save_all = AsyncMock()
 
@@ -1762,3 +1763,117 @@ class TestDeviceCoordinatorCreateDevicesInterruption:
 
         assert len(central.device_registry.get_device_addresses()) == 1
         central.event_coordinator.publish_system_event.assert_called_once()  # type: ignore[attr-defined]
+
+
+def _make_coordinator(*, central: _FakeCentral) -> DeviceCoordinator:
+    """Create a DeviceCoordinator wired to the fake central."""
+    return DeviceCoordinator(
+        central_info=central,
+        client_provider=central,
+        config_provider=central,
+        coordinator_provider=central,
+        data_cache_provider=central.cache_coordinator.data_cache,
+        data_point_provider=central,
+        device_description_provider=central.cache_coordinator.device_descriptions,
+        device_details_provider=central.cache_coordinator.device_details,
+        event_bus_provider=central,
+        event_publisher=central,
+        event_subscription_manager=central,
+        file_operations=central,
+        parameter_visibility_provider=central.cache_coordinator.parameter_visibility,
+        paramset_description_provider=central.cache_coordinator.paramset_descriptions,
+        task_scheduler=central.looper,
+    )  # type: ignore[arg-type]
+
+
+class TestDeviceCoordinatorRefreshDeviceDetails:
+    """Test the details refresh performed before device creation."""
+
+    @pytest.mark.asyncio
+    async def test_refresh_forces_fetch_when_names_missing(self) -> None:
+        """Missing names for new devices must force a direct details fetch."""
+        central = _FakeCentral()
+        details = central.cache_coordinator.device_details
+        details.get_name = MagicMock(return_value=None)
+        details.refresh = AsyncMock()
+        coordinator = _make_coordinator(central=central)
+
+        await coordinator._refresh_device_details_for_new_devices(
+            new_device_addresses={"test-interface": {"VCU0000001"}}
+        )
+
+        details.refresh.assert_awaited_once_with(direct_call=True)
+
+    @pytest.mark.asyncio
+    async def test_refresh_relies_on_ttl_when_names_known(self) -> None:
+        """Known names must not force a fetch - the TTL guard decides."""
+        central = _FakeCentral()
+        details = central.cache_coordinator.device_details
+        details.get_name = MagicMock(return_value="Known Device")
+        details.refresh = AsyncMock()
+        coordinator = _make_coordinator(central=central)
+
+        await coordinator._refresh_device_details_for_new_devices(
+            new_device_addresses={"test-interface": {"VCU0000001"}}
+        )
+
+        details.refresh.assert_awaited_once_with(direct_call=False)
+
+
+class TestDeviceCoordinatorRenameNewDevice:
+    """Test that renaming a new device reuses one details fetch for the whole batch."""
+
+    @pytest.mark.asyncio
+    async def test_rename_new_device_skips_addresses_without_ise_id(self) -> None:
+        """Addresses without a resolvable ise_id must be skipped with a warning."""
+        central = _FakeCentral()
+        central.cache_coordinator.device_details.get_address_id = MagicMock(return_value=0)
+        coordinator = _make_coordinator(central=central)
+
+        client = MagicMock()
+        client.fetch_device_details = AsyncMock()
+        client.rename_device = AsyncMock()
+        client.rename_channel = AsyncMock()
+
+        await coordinator._rename_new_device(
+            client=client,
+            device_descriptions=(DeviceDescription(TYPE="HmIP-Test", ADDRESS="VCU0000001"),),
+            device_name="New Name",
+        )
+
+        client.rename_device.assert_not_awaited()
+        client.rename_channel.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_rename_new_device_uses_single_details_fetch(self) -> None:
+        """Renaming a device plus channels must fetch device details exactly once."""
+        central = _FakeCentral()
+        ise_ids = {"VCU0000001": 100, "VCU0000001:1": 101, "VCU0000001:2": 102}
+        central.cache_coordinator.device_details.get_address_id = MagicMock(
+            side_effect=lambda *, address: ise_ids.get(address, 0)
+        )
+        coordinator = _make_coordinator(central=central)
+
+        client = MagicMock()
+        client.fetch_device_details = AsyncMock()
+        client.get_ise_id_by_address = AsyncMock()
+        client.rename_device = AsyncMock()
+        client.rename_channel = AsyncMock()
+
+        device_descriptions = (
+            DeviceDescription(TYPE="HmIP-Test", ADDRESS="VCU0000001"),
+            DeviceDescription(TYPE="HmIP-Test", ADDRESS="VCU0000001:1", PARENT="VCU0000001"),
+            DeviceDescription(TYPE="HmIP-Test", ADDRESS="VCU0000001:2", PARENT="VCU0000001"),
+        )
+
+        await coordinator._rename_new_device(
+            client=client,
+            device_descriptions=device_descriptions,
+            device_name="New Name",
+        )
+
+        # One batch fetch, no per-address Device.listAllDetail lookups
+        client.fetch_device_details.assert_awaited_once()
+        client.get_ise_id_by_address.assert_not_awaited()
+        client.rename_device.assert_awaited_once_with(ise_id=100, new_name="New Name")
+        assert client.rename_channel.await_count == 2

@@ -158,7 +158,10 @@ class CentralDataCache(DataCacheProviderProtocol, DataCacheWriterProtocol, Cache
                 last_change=self._get_refreshed_at(interface=client.interface),
                 max_age=int(MAX_CACHE_AGE / 3),
             ):
-                return
+                # Freshness is tracked per interface: skip only this client instead of
+                # aborting the loop, otherwise one fresh interface would prevent all
+                # remaining interfaces from being fetched.
+                continue
             await client.fetch_all_device_data()
 
     async def refresh_data_point_data(

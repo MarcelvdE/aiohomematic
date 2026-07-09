@@ -871,10 +871,10 @@ sequenceDiagram
   end
 
   rect rgb(255, 248, 240)
-    Note over DDtC: DeviceDetailsCache (in-memory)
+    Note over DDtC: DeviceDetailsCache (in-memory, persisted to disk)
     CX->>DDtC: add_name(address, name)
     CX->>DDtC: add_interface(address, interface)
-    Note over DDtC: Cached until explicit clear() or refresh
+    Note over DDtC: refresh() guarded by DEVICE_DETAILS_MAX_CACHE_AGE, persisted after refresh
   end
 
   Note over C: Invalidation Triggers
@@ -925,7 +925,7 @@ sequenceDiagram
 | ParamsetDescriptionRegistry | Persistent | Disk    | Device structure change, manual clear        | MAX_CACHE_AGE   |
 | IncidentStore               | Persistent | Disk    | Save-on-incident, cleanup on load            | 7 days default  |
 | CentralDataCache            | Dynamic    | Memory  | Reconnect, periodic refresh, interface clear | MAX_CACHE_AGE/3 |
-| DeviceDetailsCache          | Dynamic    | Memory  | Explicit refresh, manual clear               | None (refresh)  |
+| DeviceDetailsCache          | Dynamic    | Memory + Disk | Explicit refresh, manual clear         | DEVICE_DETAILS_MAX_CACHE_AGE |
 | CommandCache                | Dynamic    | Memory  | TTL expiry per entry, clear on write confirm | Per-entry TTL   |
 | PingPongTracker             | Dynamic    | Memory  | Pong received, TTL expiry                    | Per-entry TTL   |
 | ParameterVisibilityRegistry | Computed   | Memory  | Never (static rules)                         | Unbounded       |

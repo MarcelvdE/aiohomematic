@@ -5,6 +5,12 @@ Device details cache for runtime device metadata.
 
 This module provides DeviceDetailsCache which enriches devices with human-readable
 names, interface mapping, rooms, functions, and address IDs fetched via the backend.
+
+The fetch behind ``refresh()`` is expensive for the CCU: ``Device.listAllDetail``,
+``Room.getAll`` and ``Subsection.getAll`` are CCU-wide JSON-RPC calls without any
+filter parameter. The cache is therefore persisted to disk (warm restarts reuse the
+last known metadata and refresh in the background) and guarded by a long freshness
+TTL (``DEVICE_DETAILS_MAX_CACHE_AGE``) because names/rooms/functions rarely change.
 """
 
 import asyncio
@@ -12,26 +18,43 @@ from collections import defaultdict
 from collections.abc import Mapping
 from datetime import datetime
 import logging
-from typing import Final, cast
+from typing import Any, Final, cast
 
-from aiohomematic.const import INIT_DATETIME, MAX_CACHE_AGE, Interface
+from aiohomematic.const import DEVICE_DETAILS_MAX_CACHE_AGE, INIT_DATETIME, DataOperationResult, Interface
 from aiohomematic.interfaces import (
     CentralInfoProtocol,
+    ConfigProviderProtocol,
     DeviceDetailsProviderProtocol,
     DeviceDetailsWriterProtocol,
     PrimaryClientProviderProtocol,
 )
 from aiohomematic.interfaces.model import DeviceRemovalInfoProtocol
 from aiohomematic.property_decorators import DelegatedProperty
+from aiohomematic.store.persistent.base import BasePersistentCache
+from aiohomematic.store.storage import StorageProtocol
 from aiohomematic.support import changed_within_seconds
 from aiohomematic.support.address import get_device_address
 
 _LOGGER: Final = logging.getLogger(__name__)
 
+_CHANNEL_ROOMS: Final = "channel_rooms"
+_FUNCTIONS: Final = "functions"
+_INTERFACES: Final = "interfaces"
+_ISE_IDS: Final = "ise_ids"
+_NAMES: Final = "names"
 
-class DeviceDetailsCache(DeviceDetailsProviderProtocol, DeviceDetailsWriterProtocol):
+
+class DeviceDetailsCache(BasePersistentCache, DeviceDetailsProviderProtocol, DeviceDetailsWriterProtocol):
     """
     Cache for device/channel details.
+
+    Persistence
+    -----------
+    The cache content (names, ReGa ids, interfaces, rooms, functions) is persisted
+    to disk via the storage abstraction. On a warm restart the persisted content is
+    loaded via ``load()`` so device creation does not have to wait for the CCU-wide
+    ``Device.listAllDetail``/``Room.getAll``/``Subsection.getAll`` fetch; a
+    background ``refresh()`` afterwards brings the cache up to date.
 
     Concurrency
     -----------
@@ -51,9 +74,9 @@ class DeviceDetailsCache(DeviceDetailsProviderProtocol, DeviceDetailsWriterProto
         "_device_rooms",
         "_functions",
         "_interface_cache",
-        "_load_lock",
         "_names_cache",
         "_primary_client_provider",
+        "_refresh_lock",
         "_refreshed_at",
     )
 
@@ -61,9 +84,12 @@ class DeviceDetailsCache(DeviceDetailsProviderProtocol, DeviceDetailsWriterProto
         self,
         *,
         central_info: CentralInfoProtocol,
+        config_provider: ConfigProviderProtocol,
         primary_client_provider: PrimaryClientProviderProtocol,
+        storage: StorageProtocol,
     ) -> None:
         """Initialize the device details cache."""
+        super().__init__(storage=storage, config_provider=config_provider)
         self._central_info: Final = central_info
         self._primary_client_provider: Final = primary_client_provider
         self._channel_rooms: Final[dict[str, set[str]]] = defaultdict(set)
@@ -71,7 +97,7 @@ class DeviceDetailsCache(DeviceDetailsProviderProtocol, DeviceDetailsWriterProto
         self._device_rooms: Final[dict[str, set[str]]] = defaultdict(set)
         self._functions: Final[dict[str, set[str]]] = {}
         self._interface_cache: Final[dict[str, Interface]] = {}
-        self._load_lock: Final = asyncio.Lock()
+        self._refresh_lock: Final = asyncio.Lock()
         self._names_cache: Final[dict[str, str]] = {}
         self._refreshed_at = INIT_DATETIME
 
@@ -89,8 +115,13 @@ class DeviceDetailsCache(DeviceDetailsProviderProtocol, DeviceDetailsWriterProto
         """Add name to cache."""
         self._names_cache[address] = name
 
-    def clear(self) -> None:
-        """Clear the cache."""
+    async def clear(self) -> None:
+        """Remove persisted content and clear the in-memory cache."""
+        await super().clear()
+        self.clear_in_memory()
+
+    def clear_in_memory(self) -> None:
+        """Clear the in-memory cache content."""
         self._names_cache.clear()
         self._channel_rooms.clear()
         self._device_rooms.clear()
@@ -123,36 +154,48 @@ class DeviceDetailsCache(DeviceDetailsProviderProtocol, DeviceDetailsWriterProto
         """Get name from cache."""
         return self._names_cache.get(address)
 
-    async def load(self, *, direct_call: bool = False) -> None:
+    async def refresh(self, *, direct_call: bool = False) -> None:
         """
-        Fetch names from the backend.
+        Fetch names, rooms and functions from the backend.
 
-        Serialized via ``_load_lock``: multiple callers (e.g. the per-interface
+        No-ops while the cache is fresh (``DEVICE_DETAILS_MAX_CACHE_AGE``) unless
+        ``direct_call`` is True. The fetch is CCU-wide (``Device.listAllDetail``,
+        ``Room.getAll``, ``Subsection.getAll`` have no filter parameter), so callers
+        must not force it more often than necessary.
+
+        Serialized via ``_refresh_lock``: multiple callers (e.g. the per-interface
         scheduled refresh, which fans out over all clients concurrently via
-        asyncio.gather) can race the check-then-clear-then-refetch sequence
-        below, since it awaits between the staleness check and repopulating
-        the cache. Without the lock, two concurrent calls can interleave their
-        clear()/populate steps and leave the cache missing entries for one
-        of the two backends involved.
+        asyncio.gather) can race the check-then-refetch sequence below, since it
+        awaits between the staleness check and repopulating the cache.
+
+        The fetched data is swapped into the cache without an intermediate cleared
+        state: names are overwritten in place, rooms/functions are collected first
+        and replaced synchronously. Devices created concurrently therefore never
+        observe a half-empty cache.
         """
-        async with self._load_lock:
+        async with self._refresh_lock:
             if direct_call is False and changed_within_seconds(
-                last_change=self._refreshed_at, max_age=int(MAX_CACHE_AGE / 3)
+                last_change=self._refreshed_at, max_age=DEVICE_DETAILS_MAX_CACHE_AGE
             ):
                 return
-            self.clear()
-            _LOGGER.debug("LOAD: Loading names for %s", self._central_info.name)
-            if client := self._primary_client_provider.primary_client:
-                await client.fetch_device_details()
-            _LOGGER.debug("LOAD: Loading rooms for %s", self._central_info.name)
+            if (client := self._primary_client_provider.primary_client) is None:
+                # Keep whatever is cached; a later call retries once a client exists.
+                return
+            _LOGGER.debug("REFRESH: Loading names for %s", self._central_info.name)
+            await client.fetch_device_details()
+            _LOGGER.debug("REFRESH: Loading rooms for %s", self._central_info.name)
+            channel_rooms = await self._get_all_rooms()
+            _LOGGER.debug("REFRESH: Loading functions for %s", self._central_info.name)
+            functions = await self._get_all_functions()
+            # No await between here and the end of the block: replace atomically.
             self._channel_rooms.clear()
-            self._channel_rooms.update(await self._get_all_rooms())
+            self._channel_rooms.update(channel_rooms)
             self._device_rooms.clear()
             self._device_rooms.update(self._prepare_device_rooms())
-            _LOGGER.debug("LOAD: Loading functions for %s", self._central_info.name)
             self._functions.clear()
-            self._functions.update(await self._get_all_functions())
+            self._functions.update(functions)
             self._refreshed_at = datetime.now()
+        await self.save()
 
     def remove_device(self, *, device: DeviceRemovalInfoProtocol) -> None:
         """Remove device data from all caches."""
@@ -170,6 +213,30 @@ class DeviceDetailsCache(DeviceDetailsProviderProtocol, DeviceDetailsWriterProto
             self._device_channel_ise_ids.pop(channel_address, None)
             self._channel_rooms.pop(channel_address, None)
             self._functions.pop(channel_address, None)
+
+    async def save(self) -> DataOperationResult:
+        """Persist the device details to storage."""
+        self._content.clear()
+        self._content.update(
+            {
+                _NAMES: dict(self._names_cache),
+                _ISE_IDS: dict(self._device_channel_ise_ids),
+                _INTERFACES: {address: interface.value for address, interface in self._interface_cache.items()},
+                _CHANNEL_ROOMS: {address: sorted(rooms) for address, rooms in self._channel_rooms.items() if rooms},
+                _FUNCTIONS: {address: sorted(functions) for address, functions in self._functions.items()},
+            }
+        )
+        return await super().save()
+
+    def _create_empty_content(self) -> dict[str, Any]:
+        """Create empty content structure."""
+        return {
+            _NAMES: {},
+            _ISE_IDS: {},
+            _INTERFACES: {},
+            _CHANNEL_ROOMS: {},
+            _FUNCTIONS: {},
+        }
 
     async def _get_all_functions(self) -> Mapping[str, set[str]]:
         """Get all functions, if available."""
@@ -210,3 +277,27 @@ class DeviceDetailsCache(DeviceDetailsProviderProtocol, DeviceDetailsWriterProto
                 # and merge this channel's rooms into the device's room set
                 _device_rooms[get_device_address(address=channel_address)].update(rooms)
         return _device_rooms
+
+    def _process_loaded_content(self, *, data: dict[str, Any]) -> None:
+        """Rebuild the in-memory caches from persisted content."""
+        self._names_cache.clear()
+        self._names_cache.update(data.get(_NAMES, {}))
+        self._device_channel_ise_ids.clear()
+        self._device_channel_ise_ids.update(data.get(_ISE_IDS, {}))
+        self._interface_cache.clear()
+        self._interface_cache.update(
+            {
+                address: Interface(interface)
+                for address, interface in data.get(_INTERFACES, {}).items()
+                if interface in Interface
+            }
+        )
+        self._channel_rooms.clear()
+        for address, rooms in data.get(_CHANNEL_ROOMS, {}).items():
+            self._channel_rooms[address] = set(rooms)
+        self._device_rooms.clear()
+        self._device_rooms.update(self._prepare_device_rooms())
+        self._functions.clear()
+        self._functions.update({address: set(functions) for address, functions in data.get(_FUNCTIONS, {}).items()})
+        # Persisted content is a warm-start aid, not fresh data: leave _refreshed_at
+        # at INIT_DATETIME so the next refresh() actually fetches from the backend.

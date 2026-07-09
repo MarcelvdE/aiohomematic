@@ -522,7 +522,12 @@ def _get_base_name_from_channel_or_device(*, channel: ChannelProtocol) -> str | 
     default_channel_name = f"{channel.device.model} {channel.address}"
     # Access device details provider through channel's device
     name = channel.device.device_details_provider.get_name(address=channel.address)
-    if name is None or name == default_channel_name:
+    # Backends that don't track per-channel names (e.g. Homegear's getMetadata) echo
+    # back the device's own resolved name for every channel address instead of the
+    # synthetic default_channel_name pattern above. Treat that echo as "no distinct
+    # channel name" too, otherwise the device name gets misused as the channel_name
+    # verbatim (dropping the channel disambiguation instead of falling back to it).
+    if name is None or name in (default_channel_name, channel.device.name):
         return channel.device.name if channel.no is None else f"{channel.device.name}:{channel.no}"
     return name
 

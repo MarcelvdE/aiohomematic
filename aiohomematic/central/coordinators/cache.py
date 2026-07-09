@@ -21,8 +21,8 @@ from typing import Final
 
 from aiohomematic.central.events import DeviceRemovedEvent
 from aiohomematic.central.events.internal import CacheInvalidatedEvent, DataFetchCompletedEvent, DataFetchOperation
-from aiohomematic.exceptions import BaseHomematicException
 from aiohomematic.const import (
+    FILE_DEVICE_DETAILS,
     FILE_DEVICES,
     FILE_INCIDENTS,
     FILE_PARAMSETS,
@@ -32,6 +32,7 @@ from aiohomematic.const import (
     DataOperationResult,
     Interface,
 )
+from aiohomematic.exceptions import BaseHomematicException
 from aiohomematic.interfaces import (
     CentralInfoProtocol,
     ClientProviderProtocol,
@@ -96,6 +97,7 @@ class CacheCoordinator(SessionRecorderProviderProtocol, CacheProviderForMetricsP
         "_parameter_visibility_registry",
         "_paramset_descriptions_registry",
         "_session_recorder",
+        "_task_scheduler",
         "_unsubscribers",
     )
 
@@ -131,10 +133,15 @@ class CacheCoordinator(SessionRecorderProviderProtocol, CacheProviderForMetricsP
         """
         self._central_info: Final = central_info
         self._event_bus_provider: Final = event_bus_provider
+        self._task_scheduler: Final = task_scheduler
 
         # Create storage instances for persistent caches
         device_storage = storage_factory.create_storage(
             key=FILE_DEVICES,
+            sub_directory=SUB_DIRECTORY_CACHE,
+        )
+        device_details_storage = storage_factory.create_storage(
+            key=FILE_DEVICE_DETAILS,
             sub_directory=SUB_DIRECTORY_CACHE,
         )
         paramset_storage = storage_factory.create_storage(
@@ -155,7 +162,9 @@ class CacheCoordinator(SessionRecorderProviderProtocol, CacheProviderForMetricsP
         )
         self._device_details_cache: Final = DeviceDetailsCache(
             central_info=central_info,
+            config_provider=config_provider,
             primary_client_provider=primary_client_provider,
+            storage=device_details_storage,
         )
         self._device_descriptions_registry: Final = DeviceDescriptionRegistry(
             storage=device_storage,
@@ -237,7 +246,7 @@ class CacheCoordinator(SessionRecorderProviderProtocol, CacheProviderForMetricsP
         await self._paramset_descriptions_registry.clear()
         await self._session_recorder.clear()
         data_cache_size = self._data_cache.size
-        self._device_details_cache.clear()
+        await self._device_details_cache.clear()
         self._data_cache.clear()
 
         # Emit single consolidated cache invalidation event
@@ -255,7 +264,7 @@ class CacheCoordinator(SessionRecorderProviderProtocol, CacheProviderForMetricsP
         """Clear in-memory caches on shutdown to free memory."""
         _LOGGER.debug("CLEAR_ON_STOP: Clearing in-memory caches for %s", self._central_info.name)
         data_cache_size = self._data_cache.size
-        self._device_details_cache.clear()
+        self._device_details_cache.clear_in_memory()
         self._data_cache.clear()
         self._parameter_visibility_registry.clear_memoization_caches()
 
@@ -307,14 +316,23 @@ class CacheCoordinator(SessionRecorderProviderProtocol, CacheProviderForMetricsP
             await self.clear_all()
             return False  # Signal that caches need to be rebuilt from CCU
 
-        try:
-            await self._device_details_cache.load()
-        except BaseHomematicException as ex:
-            _LOGGER.warning(  # i18n-log: ignore
-                "LOAD_ALL: device_details_cache.load() failed for %s, continuing with cached topology only: %s",
-                self._central_info.name,
-                ex,
+        # Warm start: reuse the persisted device details (names/rooms/functions) and
+        # refresh them in the background instead of blocking startup on three
+        # CCU-wide JSON-RPC calls (Device.listAllDetail, Room.getAll, Subsection.getAll).
+        if await self._device_details_cache.load() == DataOperationResult.LOAD_SUCCESS:
+            self._task_scheduler.create_task(
+                target=self._refresh_device_details(),
+                name=f"refresh_device_details_{self._central_info.name}",
             )
+        else:
+            try:
+                await self._device_details_cache.refresh()
+            except BaseHomematicException as ex:
+                _LOGGER.warning(  # i18n-log: ignore
+                    "LOAD_ALL: device_details_cache.refresh() failed for %s, continuing with cached topology only: %s",
+                    self._central_info.name,
+                    ex,
+                )
 
         try:
             await self._data_cache.load()
@@ -491,3 +509,14 @@ class CacheCoordinator(SessionRecorderProviderProtocol, CacheProviderForMetricsP
         self._device_descriptions_registry.remove_device(device=removal_info)  # type: ignore[arg-type]
         self._paramset_descriptions_registry.remove_device(device=removal_info)  # type: ignore[arg-type]
         self._device_details_cache.remove_device(device=removal_info)  # type: ignore[arg-type]
+
+    async def _refresh_device_details(self) -> None:
+        """Refresh the device details cache in the background after a warm start."""
+        try:
+            await self._device_details_cache.refresh()
+        except BaseHomematicException as ex:
+            _LOGGER.warning(  # i18n-log: ignore
+                "REFRESH_DEVICE_DETAILS: background refresh failed for %s, continuing with persisted details: %s",
+                self._central_info.name,
+                ex,
+            )

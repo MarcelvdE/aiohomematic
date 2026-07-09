@@ -1037,30 +1037,6 @@ class TestCommandThrottleStop:
         with pytest.raises(asyncio.CancelledError):
             await throttle.acquire(priority=CommandPriority.HIGH, device_address="TEST:1")
 
-    async def test_stop_cancels_worker_task(self) -> None:
-        """Test that stop() cancels the background worker task."""
-        throttle = CommandThrottle(interface_id="TEST", interval=0.1)
-        assert throttle._worker_task is not None
-        assert not throttle._worker_task.done()
-
-        throttle.stop()
-        await asyncio.sleep(0.01)
-
-        assert throttle._worker_task.done()
-
-    async def test_stop_is_idempotent(self) -> None:
-        """Test that calling stop() twice does not raise."""
-        throttle = CommandThrottle(interface_id="TEST", interval=0.1)
-        throttle.stop()
-        throttle.stop()  # Second call should not raise
-
-    async def test_stopped_flag_prevents_enqueue(self) -> None:
-        """Test that the _stopped flag is set after stop()."""
-        throttle = CommandThrottle(interface_id="TEST", interval=0.1)
-        assert throttle._stopped is False
-        throttle.stop()
-        assert throttle._stopped is True
-
     @pytest.mark.asyncio
     async def test_interface_client_stop_cancels_command_throttle_worker(self) -> None:
         """
@@ -1092,6 +1068,30 @@ class TestCommandThrottleStop:
 
         assert throttle._stopped is True
         assert throttle._worker_task.done()
+
+    async def test_stop_cancels_worker_task(self) -> None:
+        """Test that stop() cancels the background worker task."""
+        throttle = CommandThrottle(interface_id="TEST", interval=0.1)
+        assert throttle._worker_task is not None
+        assert not throttle._worker_task.done()
+
+        throttle.stop()
+        await asyncio.sleep(0.01)
+
+        assert throttle._worker_task.done()
+
+    async def test_stop_is_idempotent(self) -> None:
+        """Test that calling stop() twice does not raise."""
+        throttle = CommandThrottle(interface_id="TEST", interval=0.1)
+        throttle.stop()
+        throttle.stop()  # Second call should not raise
+
+    async def test_stopped_flag_prevents_enqueue(self) -> None:
+        """Test that the _stopped flag is set after stop()."""
+        throttle = CommandThrottle(interface_id="TEST", interval=0.1)
+        assert throttle._stopped is False
+        throttle.stop()
+        assert throttle._stopped is True
 
 
 class TestCommandThrottlePurge:

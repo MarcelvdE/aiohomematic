@@ -1048,8 +1048,9 @@ class DeviceCoordinator(FirmwareDataRefresherProtocol):
 
                 # Now safe to create devices - all paramsets are guaranteed to be in cache
                 if new_device_addresses := self.check_for_new_device_addresses(interface_id=interface_id):
-                    await self._coordinator_provider.cache_coordinator.device_details.load()
-                    await self._coordinator_provider.cache_coordinator.load_data_cache(interface=client.interface)
+                    await self._refresh_device_details_for_new_devices(new_device_addresses=new_device_addresses)
+                    if source not in (SourceOfDeviceCreation.NEW, SourceOfDeviceCreation.MANUAL):
+                        await self._coordinator_provider.cache_coordinator.load_data_cache(interface=client.interface)
                     await self.create_devices(new_device_addresses=new_device_addresses, source=source)
                     self._schedule_paramset_consistency_check(
                         interface_id=interface_id,
@@ -1098,141 +1099,6 @@ class DeviceCoordinator(FirmwareDataRefresherProtocol):
                 descriptions=descriptions_to_cache,
                 source=source,
                 process_device_description=_cache_one_description,
-            )
-
-    async def _fetch_paramset_descriptions_with_retry(
-        self,
-        *,
-        client: ClientProtocol,
-        device_description: DeviceDescription,
-        interface_id: str,
-    ) -> None:
-        """
-        Fetch paramset descriptions for one device, retrying transient failures.
-
-        Bounded retry with exponential backoff for ``BaseHomematicException`` (e.g. a
-        transient timeout or connection blip). ``asyncio.CancelledError`` is not a
-        ``BaseHomematicException`` and is therefore never retried here - it propagates
-        immediately so Home Assistant reload/shutdown cancellation still works promptly.
-
-        Args:
-            client: Client to fetch paramset descriptions with.
-            device_description: Device/channel description to fetch paramsets for.
-            interface_id: Interface identifier (for logging only).
-
-        """
-        timeout_config = self._config_provider.config.timeout_config
-        max_attempts = timeout_config.device_sync_max_attempts
-        for attempt in range(1, max_attempts + 1):
-            try:
-                await client.fetch_paramset_descriptions(device_description=device_description)
-            except BaseHomematicException as exc:
-                if attempt >= max_attempts:
-                    raise
-                delay = timeout_config.device_sync_initial_retry_delay * (
-                    timeout_config.reconnect_backoff_factor ** (attempt - 1)
-                )
-                _LOGGER.debug(
-                    "FETCH_PARAMSET_DESCRIPTIONS: attempt %d/%d failed for %s on %s, retrying in %.1fs: %s",
-                    attempt,
-                    max_attempts,
-                    device_description["ADDRESS"],
-                    interface_id,
-                    delay,
-                    exc,
-                )
-                await asyncio.sleep(delay)
-            else:
-                return
-
-    async def _process_descriptions_in_chunks(
-        self,
-        *,
-        interface_id: str,
-        descriptions: tuple[DeviceDescription, ...],
-        source: SourceOfDeviceCreation,
-        process_device_description: Callable[[DeviceDescription], Awaitable[bool]],
-    ) -> None:
-        """
-        Process device/channel descriptions in device-aligned chunks.
-
-        Groups descriptions by owning device address so a chunk boundary never splits one
-        device's channels, then for each chunk: runs ``process_device_description`` per
-        entry, persists the cache, and dispatches newly-complete devices to Home Assistant.
-
-        This bounds how much progress an interruption (e.g. ``CancelledError`` from a
-        cancelled config-entry reload, or a Home Assistant restart mid-sync) can lose to a
-        single chunk instead of the entire interface's device list - the previous
-        implementation only persisted the cache and dispatched entities once, after the
-        *entire* device list had been processed.
-
-        Args:
-            interface_id: Interface identifier.
-            descriptions: Device/channel descriptions to process.
-            source: Source of device creation (passed through to ``create_devices``).
-            process_device_description: Per-description callback. Returns True if the
-                description was cached successfully (controls whether the chunk is
-                persisted). Raising is treated like returning False for that description;
-                processing continues with the next description in the chunk.
-
-        """
-        device_groups: dict[str, list[DeviceDescription]] = defaultdict(list)
-        for dev_desc in descriptions:
-            owner = dev_desc.get("PARENT") or dev_desc["ADDRESS"]
-            device_groups[owner].append(dev_desc)
-
-        owners = list(device_groups.keys())
-        chunk_size = self._config_provider.config.device_creation_chunk_size
-        client = self._coordinator_provider.client_coordinator.get_client(interface_id=interface_id)
-        total_chunks = (len(owners) + chunk_size - 1) // chunk_size
-
-        for chunk_index in range(total_chunks):
-            chunk_owners = owners[chunk_index * chunk_size : (chunk_index + 1) * chunk_size]
-            chunk_descriptions = [d for owner in chunk_owners for d in device_groups[owner]]
-
-            save_descriptions = False
-            for dev_desc in chunk_descriptions:
-                try:
-                    if await process_device_description(dev_desc):
-                        save_descriptions = True
-                except Exception as exc:  # noqa: BLE001 - per-device; skip this device and continue chunk  # pragma: no cover
-                    save_descriptions = False
-                    _LOGGER.error(  # i18n-log: ignore
-                        "UPDATE_CACHES_WITH_NEW_DEVICES failed: %s [%s]",
-                        type(exc).__name__,
-                        extract_exc_args(exc=exc),
-                    )
-
-            # Emit event ONCE per chunk to trigger automatic cache persistence
-            if save_descriptions:
-                await self._event_bus_provider.event_bus.publish(
-                    event=DataFetchCompletedEvent(
-                        timestamp=datetime.now(),
-                        interface_id=interface_id,
-                        operation=DataFetchOperation.FETCH_PARAMSET_DESCRIPTIONS,
-                    )
-                )
-
-            await self._coordinator_provider.cache_coordinator.save_all(
-                save_device_descriptions=save_descriptions,
-                save_paramset_descriptions=save_descriptions,
-            )
-
-            if new_device_addresses := self.check_for_new_device_addresses(interface_id=interface_id):
-                await self._coordinator_provider.cache_coordinator.device_details.load()
-                await self._coordinator_provider.cache_coordinator.load_data_cache(interface=client.interface)
-                await self.create_devices(new_device_addresses=new_device_addresses, source=source)
-                self._schedule_paramset_consistency_check(
-                    interface_id=interface_id,
-                    new_device_addresses=new_device_addresses,
-                )
-
-            _LOGGER.debug(
-                "ADD_NEW_DEVICES: Completed chunk %d/%d (%d device(s)) for interface_id %s",
-                chunk_index + 1,
-                total_chunks,
-                len(chunk_owners),
-                interface_id,
             )
 
     async def _check_paramset_consistency(
@@ -1360,6 +1226,51 @@ class DeviceCoordinator(FirmwareDataRefresherProtocol):
                 issues=(issue,),
             )
         )
+
+    async def _fetch_paramset_descriptions_with_retry(
+        self,
+        *,
+        client: ClientProtocol,
+        device_description: DeviceDescription,
+        interface_id: str,
+    ) -> None:
+        """
+        Fetch paramset descriptions for one device, retrying transient failures.
+
+        Bounded retry with exponential backoff for ``BaseHomematicException`` (e.g. a
+        transient timeout or connection blip). ``asyncio.CancelledError`` is not a
+        ``BaseHomematicException`` and is therefore never retried here - it propagates
+        immediately so Home Assistant reload/shutdown cancellation still works promptly.
+
+        Args:
+            client: Client to fetch paramset descriptions with.
+            device_description: Device/channel description to fetch paramsets for.
+            interface_id: Interface identifier (for logging only).
+
+        """
+        timeout_config = self._config_provider.config.timeout_config
+        max_attempts = timeout_config.device_sync_max_attempts
+        for attempt in range(1, max_attempts + 1):
+            try:
+                await client.fetch_paramset_descriptions(device_description=device_description)
+            except BaseHomematicException as exc:
+                if attempt >= max_attempts:
+                    raise
+                delay = timeout_config.device_sync_initial_retry_delay * (
+                    timeout_config.reconnect_backoff_factor ** (attempt - 1)
+                )
+                _LOGGER.debug(
+                    "FETCH_PARAMSET_DESCRIPTIONS: attempt %d/%d failed for %s on %s, retrying in %.1fs: %s",
+                    attempt,
+                    max_attempts,
+                    device_description["ADDRESS"],
+                    interface_id,
+                    delay,
+                    exc,
+                )
+                await asyncio.sleep(delay)
+            else:
+                return
 
     def _identify_devices_missing_paramsets(
         self, *, interface_id: str, device_descriptions: tuple[DeviceDescription, ...]
@@ -1492,6 +1403,128 @@ class DeviceCoordinator(FirmwareDataRefresherProtocol):
             not in known_addresses
         )
 
+    async def _process_descriptions_in_chunks(
+        self,
+        *,
+        interface_id: str,
+        descriptions: tuple[DeviceDescription, ...],
+        source: SourceOfDeviceCreation,
+        process_device_description: Callable[[DeviceDescription], Awaitable[bool]],
+    ) -> None:
+        """
+        Process device/channel descriptions in device-aligned chunks.
+
+        Groups descriptions by owning device address so a chunk boundary never splits one
+        device's channels, then for each chunk: runs ``process_device_description`` per
+        entry, persists the cache, and dispatches newly-complete devices to Home Assistant.
+
+        This bounds how much progress an interruption (e.g. ``CancelledError`` from a
+        cancelled config-entry reload, or a Home Assistant restart mid-sync) can lose to a
+        single chunk instead of the entire interface's device list - the previous
+        implementation only persisted the cache and dispatched entities once, after the
+        *entire* device list had been processed.
+
+        Args:
+            interface_id: Interface identifier.
+            descriptions: Device/channel descriptions to process.
+            source: Source of device creation (passed through to ``create_devices``).
+            process_device_description: Per-description callback. Returns True if the
+                description was cached successfully (controls whether the chunk is
+                persisted). Raising is treated like returning False for that description;
+                processing continues with the next description in the chunk.
+
+        """
+        device_groups: dict[str, list[DeviceDescription]] = defaultdict(list)
+        for dev_desc in descriptions:
+            owner = dev_desc.get("PARENT") or dev_desc["ADDRESS"]
+            device_groups[owner].append(dev_desc)
+
+        owners = list(device_groups.keys())
+        chunk_size = self._config_provider.config.device_creation_chunk_size
+        client = self._coordinator_provider.client_coordinator.get_client(interface_id=interface_id)
+        total_chunks = (len(owners) + chunk_size - 1) // chunk_size
+
+        # Fetch bulk values at most once per batch instead of once per chunk - the ReGa
+        # script behind fetch_all_device_data walks the CCU's entire device tree, so
+        # per-chunk re-fetches multiply the load on the CCU without adding information.
+        # For runtime additions (NEW/MANUAL) the interface-wide bulk fetch is skipped
+        # entirely: the few new data points fall back to getValue/getParamset calls
+        # scoped to the new device on cache miss.
+        data_cache_loaded = source in (SourceOfDeviceCreation.NEW, SourceOfDeviceCreation.MANUAL)
+
+        for chunk_index in range(total_chunks):
+            chunk_owners = owners[chunk_index * chunk_size : (chunk_index + 1) * chunk_size]
+            chunk_descriptions = [d for owner in chunk_owners for d in device_groups[owner]]
+
+            save_descriptions = False
+            for dev_desc in chunk_descriptions:
+                try:
+                    if await process_device_description(dev_desc):
+                        save_descriptions = True
+                except Exception as exc:  # noqa: BLE001 - per-device; skip this device and continue chunk  # pragma: no cover
+                    save_descriptions = False
+                    _LOGGER.error(  # i18n-log: ignore
+                        "UPDATE_CACHES_WITH_NEW_DEVICES failed: %s [%s]",
+                        type(exc).__name__,
+                        extract_exc_args(exc=exc),
+                    )
+
+            # Emit event ONCE per chunk to trigger automatic cache persistence
+            if save_descriptions:
+                await self._event_bus_provider.event_bus.publish(
+                    event=DataFetchCompletedEvent(
+                        timestamp=datetime.now(),
+                        interface_id=interface_id,
+                        operation=DataFetchOperation.FETCH_PARAMSET_DESCRIPTIONS,
+                    )
+                )
+
+            await self._coordinator_provider.cache_coordinator.save_all(
+                save_device_descriptions=save_descriptions,
+                save_paramset_descriptions=save_descriptions,
+            )
+
+            if new_device_addresses := self.check_for_new_device_addresses(interface_id=interface_id):
+                await self._refresh_device_details_for_new_devices(new_device_addresses=new_device_addresses)
+                if not data_cache_loaded:
+                    await self._coordinator_provider.cache_coordinator.load_data_cache(interface=client.interface)
+                    data_cache_loaded = True
+                await self.create_devices(new_device_addresses=new_device_addresses, source=source)
+                self._schedule_paramset_consistency_check(
+                    interface_id=interface_id,
+                    new_device_addresses=new_device_addresses,
+                )
+
+            _LOGGER.debug(
+                "ADD_NEW_DEVICES: Completed chunk %d/%d (%d device(s)) for interface_id %s",
+                chunk_index + 1,
+                total_chunks,
+                len(chunk_owners),
+                interface_id,
+            )
+
+    async def _refresh_device_details_for_new_devices(self, *, new_device_addresses: Mapping[str, set[str]]) -> None:
+        """
+        Refresh the device details cache before creating devices.
+
+        Forces a fetch when any of the new device addresses is missing a name, so a
+        device paired at runtime gets its CCU name/rooms/ise_id even while the cache
+        is still fresh. Otherwise the call no-ops until the details cache TTL
+        (DEVICE_DETAILS_MAX_CACHE_AGE) expires, so bulk creation batches trigger at
+        most one CCU-wide metadata fetch instead of one per chunk.
+
+        Args:
+            new_device_addresses: Mapping of interface IDs to new device addresses.
+
+        """
+        details = self._coordinator_provider.cache_coordinator.device_details
+        names_missing = any(
+            details.get_name(address=address) is None
+            for addresses in new_device_addresses.values()
+            for address in addresses
+        )
+        await details.refresh(direct_call=names_missing)
+
     async def _rename_new_device(
         self,
         *,
@@ -1508,12 +1541,15 @@ class DeviceCoordinator(FirmwareDataRefresherProtocol):
             device_name: The new name for the device.
 
         """
+        # A single fetch_device_details() populates the details cache (including the
+        # ReGa ise_ids for all devices and channels). Resolving the ids from the cache
+        # avoids one full Device.listAllDetail round trip per address.
         await client.fetch_device_details()
         for device_desc in device_descriptions:
             address = device_desc["ADDRESS"]
             parent = device_desc.get("PARENT")
 
-            if (ise_id := await client.get_ise_id_by_address(address=address)) is None:
+            if not (ise_id := self._device_details_provider.get_address_id(address=address)):
                 _LOGGER.warning(  # i18n-log: ignore
                     "RENAME_NEW_DEVICE: Could not get ise_id for address %s",
                     address,

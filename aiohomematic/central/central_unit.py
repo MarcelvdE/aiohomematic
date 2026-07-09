@@ -469,14 +469,17 @@ class CentralUnit(
         direct_call: bool = False,
     ) -> None:
         """Refresh data_point data."""
-        # Retry device_details_cache here too if the initial load_all() (start()) failed
-        # to fetch it (e.g. a slow/unresponsive CCU). load() itself no-ops if the cache
-        # was already refreshed recently, so this is safe to call on every scheduled tick.
+        # Metadata (names/rooms/functions) is decoupled from the 15s value poll:
+        # refresh() no-ops while the details cache is fresh (DEVICE_DETAILS_MAX_CACHE_AGE),
+        # so this does not add CCU-wide JSON-RPC calls to every scheduled tick. It only
+        # retries when the cache is stale or the initial fetch failed at startup. The
+        # value refresh below (data_cache.load) keeps its own short cadence - CUxD and
+        # CCU-Jack have no push events and depend on it for actual state updates.
         try:
-            await self._cache_coordinator.device_details.load()
+            await self._cache_coordinator.device_details.refresh()
         except BaseHomematicException as ex:
             _LOGGER.warning(
-                "LOAD_AND_REFRESH_DATA_POINT_DATA: device_details_cache.load() retry failed for %s: %s",
+                "LOAD_AND_REFRESH_DATA_POINT_DATA: device_details_cache.refresh() failed for %s: %s",
                 self.name,
                 ex,
             )
@@ -708,7 +711,12 @@ class CentralUnit(
             await self._client_coordinator.stop_clients()
             if self._json_rpc_client.is_activated:
                 await self._json_rpc_client.logout()
-                await self._json_rpc_client.stop()
+            # Always close the JSON-RPC client's HTTP session, even if login never
+            # succeeded (e.g. the CCU was unreachable during start()): the session is
+            # created unconditionally in AioJsonRpcAioHttpClient.__init__, so skipping
+            # this leaves its aiohttp connector open and logs an "Unclosed connector"
+            # warning when it is later garbage-collected.
+            await self._json_rpc_client.stop()
 
             if self._xml_rpc_server:
                 # un-register this instance from XmlRPC-Server

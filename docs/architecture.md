@@ -207,7 +207,7 @@ Legend: `x` = depends on (reads from or delegates to), `-` = no dependency.
   - CentralDataCache holds recent values and metadata to accelerate lookups and avoid redundant conversions.
   - CommandTracker and PingPongTracker support write-ack workflows and connection health checks.
   - PingPongTracker includes a PingPongJournal ring buffer for tracking PING/PONG events and RTT statistics.
-  - DeviceDetailsCache stores supplementary per-device data fetched on demand.
+  - DeviceDetailsCache stores supplementary per-device data (names, ReGa ids, rooms, functions). Unlike the other dynamic caches it is also persisted to disk, so warm restarts reuse the last known metadata and refresh it in the background.
 - Visibility cache
   - ParameterVisibilityRegistry determines which parameters are exposed as DataPoints/events, influenced by user un-ignore lists and marker rules.
 

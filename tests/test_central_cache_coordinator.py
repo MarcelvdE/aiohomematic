@@ -183,7 +183,7 @@ class TestCacheCoordinatorClearOperations:
         # Mock all cache clear methods at class level
         with (
             patch.object(CentralDataCache, "clear", new=MagicMock()) as mock_data_clear,
-            patch.object(DeviceDetailsCache, "clear", new=MagicMock()) as mock_details_clear,
+            patch.object(DeviceDetailsCache, "clear", new=AsyncMock()) as mock_details_clear,
             patch.object(DeviceDescriptionRegistry, "clear", new=AsyncMock()) as mock_desc_clear,
             patch.object(ParamsetDescriptionRegistry, "clear", new=AsyncMock()) as mock_param_clear,
             patch.object(SessionRecorder, "clear", new=AsyncMock()),
@@ -216,7 +216,7 @@ class TestCacheCoordinatorClearOperations:
         # Mock one cache to raise an exception
         with (
             patch.object(CentralDataCache, "clear", new=MagicMock(side_effect=RuntimeError("Cache error"))),
-            patch.object(DeviceDetailsCache, "clear", new=MagicMock()),
+            patch.object(DeviceDetailsCache, "clear", new=AsyncMock()),
             patch.object(SessionRecorder, "clear", new=AsyncMock()),
         ):
             coordinator = CacheCoordinator(
@@ -495,7 +495,7 @@ class TestCacheCoordinatorIntegration:
             patch.object(DeviceDescriptionRegistry, "save", new=AsyncMock()) as mock_desc_save,
             patch.object(ParamsetDescriptionRegistry, "save", new=AsyncMock()) as mock_param_save,
             patch.object(CentralDataCache, "clear", new=MagicMock()) as mock_data_clear,
-            patch.object(DeviceDetailsCache, "clear", new=MagicMock()) as mock_details_clear,
+            patch.object(DeviceDetailsCache, "clear", new=AsyncMock()) as mock_details_clear,
             patch.object(DeviceDescriptionRegistry, "clear", new=AsyncMock()) as mock_desc_clear,
             patch.object(ParamsetDescriptionRegistry, "clear", new=AsyncMock()) as mock_param_clear,
             patch.object(SessionRecorder, "clear", new=AsyncMock()),
@@ -595,7 +595,7 @@ class TestCacheCoordinatorEvents:
 
         with (
             patch.object(CentralDataCache, "clear", new=MagicMock()),
-            patch.object(DeviceDetailsCache, "clear", new=MagicMock()),
+            patch.object(DeviceDetailsCache, "clear", new=AsyncMock()),
             patch.object(DeviceDescriptionRegistry, "clear", new=AsyncMock()),
             patch.object(ParamsetDescriptionRegistry, "clear", new=AsyncMock()),
             patch.object(SessionRecorder, "clear", new=AsyncMock()),

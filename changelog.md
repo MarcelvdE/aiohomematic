@@ -1,3 +1,51 @@
+# Version 2026.7.2 (unreleased)
+
+## What's Changed
+
+### Changed
+
+- **Reduced avoidable CCU load during discovery, startup and steady-state polling.**
+  The device metadata calls `Device.listAllDetail`, `Room.getAll` and
+  `Subsection.getAll` are CCU-wide JSON-RPC requests without any filter parameter
+  (verified against the CCU WebUI API definition in eq-3/occu `methods.conf`), so
+  every avoidable execution walks the CCU's whole device tree. Five changes cut
+  the redundant executions:
+  - **Metadata refresh decoupled from the 15s value poll.** The device details
+    cache (names/rooms/functions) now has its own freshness TTL
+    (`DEVICE_DETAILS_MAX_CACHE_AGE`, 300s) instead of the always-stale
+    `MAX_CACHE_AGE/3` guard. CUxD/CCU-Jack installations previously paid three
+    CCU-wide JSON-RPC calls every 15 seconds forever; the 15s tick still refreshes
+    **values** for polled interfaces at the same cadence (their only state-update
+    mechanism), it just no longer re-fetches unchanged metadata each tick.
+  - **Initial device creation fetches bulk data once per batch.** During chunked
+    device creation, the device details fetch and the interface-wide
+    `fetch_all_device_data` ReGa script now run at most once per
+    `_add_new_devices()` batch instead of once per 10-device chunk.
+  - **Runtime device additions are scoped.** Adding a device at runtime no longer
+    triggers the interface-wide `fetch_all_device_data` ReGa walk; the new data
+    points fall back to `getValue`/`getParamset` calls scoped to the new device.
+    The details cache is force-refreshed only when the new device's name is
+    missing. Renaming a newly added device (and its channels) now resolves all
+    ReGa ids from a single `Device.listAllDetail` fetch instead of one full fetch
+    per address.
+  - **Per-interface freshness bug fixed in `CentralDataCache.load()`.** A `return`
+    instead of `continue` in the per-interface loop made one freshly loaded
+    interface skip the fetch for all remaining interfaces.
+  - **Device details cache persists across restarts.** Names/ReGa ids/interfaces/
+    rooms/functions are now stored on disk
+    (`{central}_homematic_device_details.json`) like the device and paramset
+    description registries. A warm restart reuses the persisted metadata
+    immediately and refreshes it in the background instead of blocking startup on
+    three CCU-wide JSON-RPC calls. `DeviceDetailsCache.load()` now means
+    "load from disk"; the backend fetch was renamed to
+    `DeviceDetailsCache.refresh()`.
+
+  The per-interface execution of the `fetch_all_device_data` ReGa script was
+  deliberately kept: the script already filters by interface server-side via its
+  `##interface##` parameter, and merging all interfaces into one execution would
+  require reworking its VirtualDevices special-casing, which cannot be safely
+  verified without CCU hardware.
+
 # Version 2026.7.1 (2026-07-03)
 
 ## What's Changed
