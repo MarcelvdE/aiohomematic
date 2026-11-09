@@ -35,16 +35,16 @@ classifiers = [
 ]
 requires-python = ">=3.14"
 dependencies = [
-    "aiohttp>=3.12.0",
-    "openccu-data>=2026.5.0",
-    "pydantic>=2.10.0",
-    "python-slugify>=8.0.0",
+    "aiohttp>=3.14.5",
+    "openccu-data>=2026.9.1",
+    "pydantic>=2.14.2",
+    "python-slugify>=9.1.3",
 ]
 
 [project.optional-dependencies]
 # orjson provides faster JSON serialization but does not support free-threaded Python.
 # The compat module automatically falls back to stdlib json when orjson is unavailable.
-fast = ["orjson>=3.11.0"]
+fast = ["orjson>=3.13.0"]
 
 [project.urls]
 "Homepage" = "https://github.com/sukramj/aiohomematic"
